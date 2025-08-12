@@ -648,17 +648,16 @@ class WireProxyManager(QtWidgets.QMainWindow):
         profile["running"] = False
 
     def generate_wireproxy_conf(self, wg_conf, port, output_conf, proxy_type: str = "socks"):
+        # Theo whyvl/wireproxy: dùng WGConfig + section [Socks5] hoặc [http]
+        section = "http" if str(proxy_type).lower() == "http" else "Socks5"
         with open(output_conf, "w", encoding="utf-8") as f:
-            f.write(f"[WireGuard]\nConfigFile = {wg_conf}\n\n")
-            f.write("[Proxy]\n")
+            f.write(f"WGConfig = {wg_conf}\n\n")
+            f.write(f"[{section}]\n")
             f.write(f"BindAddress = 127.0.0.1:{port}\n")
-            # wireproxy chấp nhận 'socks' hoặc 'http'
-            pt = "http" if str(proxy_type).lower() == "http" else "socks"
-            f.write(f"ProxyType = {pt}\n")
         try:
             with open(output_conf, "r", encoding="utf-8") as rf:
                 content_preview = rf.read()
-            LOGGER.debug(f"Generated wireproxy conf for port={port}, type={proxy_type}:\n{content_preview}")
+            LOGGER.debug(f"Generated wireproxy conf (whyvl format) for port={port}, type={proxy_type}:\n{content_preview}")
         except Exception:
             pass
 
