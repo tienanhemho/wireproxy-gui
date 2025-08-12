@@ -1,190 +1,171 @@
 # WireProxy GUI Manager
 
-Ứng dụng quản lý WireGuard profiles thông qua WireProxy với giao diện đồ họa PyQt6.
+PyQt6 desktop app to manage WireGuard profiles and spawn local proxies via WireProxy.
 
-## Mô tả
+## Description
 
-WireProxy GUI Manager là một công cụ GUI giúp bạn dễ dàng quản lý các profile WireGuard và tự động tạo SOCKS proxy thông qua WireProxy. Ứng dụng hỗ trợ import, quản lý và kết nối/ngắt kết nối các profile một cách trực quan.
+WireProxy GUI Manager lets you import, manage, connect, and disconnect WireGuard profiles easily, and start a local HTTP or SOCKS5 proxy via WireProxy.
 
-## Yêu cầu hệ thống
+## Requirements
 
 - **Python 3.10+**
 - **PyQt6**
-- **WireProxy binary** (có sẵn; nếu không nằm trong PATH, ứng dụng sẽ cho phép bạn chọn file thực thi)
-- **Windows PowerShell** (đã test)
+- **WireProxy binary** (if not found in PATH, the app lets you choose the executable)
+- **Windows PowerShell** (tested)
 
-## Cài đặt
+## Setup
 
-### 1. Clone hoặc tải về project
+### 1) Clone
 
 ```bash
 git clone <repo-url>
 cd wireproxy-gui
 ```
 
-### 2. Tạo virtual environment
+### 2) Virtual environment
 
 ```powershell
 python -m venv venv
-.\venv\Scripts\Activate.ps1
+./venv/Scripts/Activate.ps1
 ```
 
-### 3. Cài đặt dependencies
+### 3) Install dependencies
 
 ```powershell
 pip install PyQt6
 ```
 
-### 4. Cài đặt WireProxy
+### 4) Install WireProxy
 
-Tải WireProxy binary từ [GitHub releases](https://github.com/octeep/wireproxy/releases) và đặt vào PATH hoặc thư mục project.
+Download the WireProxy binary from `https://github.com/octeep/wireproxy/releases` and put it in PATH or select it in the app.
 
-## Cách sử dụng
+## Usage
 
-### 1. Khởi chạy ứng dụng
+### 1) Run the app
 
 ```powershell
-# Với virtual environment đã activate
+# With activated venv
 python app.py
 
-# Hoặc chạy trực tiếp Python trong venv từ thư mục project
+# Or via the venv python
 ./venv/Scripts/python.exe app.py
 
-# Thiết lập WireProxy (lần đầu)
-# Nếu không tìm thấy WireProxy trong PATH, vào menu chuột phải (nền bảng)
-# chọn "Cấu hình đường dẫn WireProxy…" để chọn file thực thi wireproxy.exe
+# First-time WireProxy setup
+# If not found in PATH, right-click on the table background → "Configure WireProxy path…" and select wireproxy.exe
 ```
 
-### 2. Import Profile WireGuard
+### 2) Import WireGuard profile
 
-Có 2 cách để import profile:
+Two ways:
 
-#### Cách 1: Kéo thả file (Drag & Drop)
-1. Kéo file `.conf` từ Windows Explorer
-2. Thả vào cửa sổ ứng dụng
-3. Ứng dụng sẽ tự động import và hiển thị thông báo
+#### Method A: Drag & Drop
+1. Drag a `.conf` from Explorer
+2. Drop into the app window
+3. The app imports it and shows a notification
 
-#### Cách 2: Sử dụng nút Import
-1. Nhấn nút **"Kéo thả file .conf vào màn hình hoặc nhấn để chọn"**
-2. Chọn file `.conf` trong hộp thoại
-3. File sẽ được import vào thư mục `profiles/`
+#### Method B: Import button
+1. Click the “Drag and drop a .conf here or click to choose” button
+2. Pick a `.conf` in the dialog
+3. The file will be copied into the `profiles/` folder
 
-### 3. Quản lý Profile
+### 3) Manage profiles
 
-Sau khi import, bạn sẽ thấy profile trong bảng với các cột:
+The table shows:
+- **Profile Name**: Config filename without extension
+- **Proxy Port**: Port chosen for the local proxy
+- **Status**: “Running” or “Stopped”
 
-- **Tên Profile**: Tên file config (không có phần mở rộng)
-- **Port Proxy**: Cổng SOCKS proxy (tự động chọn khi kết nối)
-- **Trạng thái**: "Đang chạy" hoặc "Chưa chạy"
-- **Hành động**: Nút Connect/Disconnect
+### 4) Connect/Disconnect
 
-### 4. Kết nối/Ngắt kết nối
+- **Connect**: start a proxy for that profile
+- **Disconnect**: stop the proxy
+- Port is chosen automatically in range 60000–65535, or right-click a row → “Connect (pick port)” to pick within the limit.
 
-- **Connect**: Nhấn nút "Connect" để bắt đầu SOCKS proxy
-- **Disconnect**: Nhấn nút "Disconnect" để dừng proxy
-- Port sẽ được tự động chọn trong khoảng 60000-65535 hoặc bạn có thể
-  click phải vào hàng → "Connect (chọn port)" để chọn nhanh trong giới hạn
+### 5) Proxy type (SOCKS5/HTTP)
 
-### 5. Chọn loại proxy (SOCKS5/HTTP)
+- Choose “Proxy type” at the top (SOCKS5 or HTTP).
+- Stored in `state.json` and used when generating WireProxy config.
+- Default: SOCKS5.
 
-- Ở thanh cấu hình phía trên, chọn mục "Loại proxy" giữa `SOCKS5` và `HTTP`.
-- Lựa chọn này sẽ được lưu vào `state.json` và áp dụng khi khởi chạy WireProxy.
-- Mặc định: SOCKS5.
+### 6) Active ports limit
 
-### 6. Giới hạn số port đang hoạt động
+- “Active ports limit” at the top controls how many concurrent ports to allow.
+- Default: 10. Use 0 for unlimited.
+- Right-click on background → “Auto-connect up to limit” to connect sequentially until the limit is hit.
 
-- Ô "Giới hạn số port đang hoạt động" ở đầu cửa sổ cho phép đặt limit.
-- Mặc định: 10. Đặt 0 để không giới hạn.
-- Menu chuột phải ngoài hàng có mục "Tự động kết nối theo giới hạn" để auto connect tuần tự cho đến khi đạt limit.
-
-### 5. Sử dụng SOCKS Proxy
-
-Sau khi kết nối thành công, bạn có thể cấu hình ứng dụng để sử dụng SOCKS proxy:
-
-```
-Host: 127.0.0.1
-Port: <Port hiển thị trong cột "Port Proxy">
-Type: SOCKS5
-```
-
-## Cấu trúc thư mục
+## Folder structure
 
 ```
 wireproxy-gui/
-├── app.py                     # File chính của ứng dụng
-├── state.json                 # Lưu trạng thái (tự tạo, đã .gitignore)
-├── state.example.json         # Mẫu state để tham khảo/chia sẻ
-├── profiles/                  # Thư mục chứa file .conf (đã .gitignore)
+├── app.py                     # Main app
+├── state.json                 # User state (auto-created, gitignored)
+├── state.example.json         # Example state
+├── profiles/                  # WireGuard .conf files (gitignored)
 │   ├── profile1.conf
 │   ├── profile2.conf
 │   └── ...
-├── venv/                      # Virtual environment (đã .gitignore)
-├── test_profile.conf          # File test mẫu
-└── README.md                  # File hướng dẫn này
+├── venv/                      # Virtual environment (gitignored)
+├── test_profile.conf          # Sample
+└── README.md                  # This guide
 ```
 
-## State, versioning và migrate
+## State, versioning, migration
 
-- File `state.json` là dữ liệu cá nhân, đã nằm trong `.gitignore`.
-- Schema có trường `version`; code có hằng `STATE_VERSION`.
-- Khi mở app, nếu `state.json` cũ hơn schema mới, app sẽ tự động migrate và tạo
-  backup `state.json.bak-<timestamp>`.
-- Mặc định `port_limit = 10`. Có thể chỉnh từ UI; app sẽ lưu lại vào `state.json`.
-- Từ phiên bản schema v2, có thêm `proxy_type` (`"socks"` hoặc `"http"`).
-- Dùng `state.example.json` làm mẫu khi cần reset hoặc chia sẻ cấu hình mặc định.
+- `state.json` is personal data and is ignored by git.
+- Schema includes `version`; the code has `STATE_VERSION`.
+- On startup, old schemas are migrated and a backup is written as `state.json.bak-<timestamp>`.
+- Default `port_limit = 10` (editable in the UI and persisted).
+- Since v2, `proxy_type` is supported (`"socks"` or `"http"`).
+- Use `state.example.json` as a clean template.
 
-## .gitignore (quan trọng)
+## .gitignore
 
-- Đã bỏ qua: `profiles/`, `venv/`, `state.json` để tránh lộ cấu hình/nhị phân cá nhân.
-  Khi đóng góp code, chỉ commit source code (ví dụ `app.py`, docs, v.v.).
+- Ignored: `profiles/`, `venv/`, `state.json`. Only source code and docs should be committed.
 
-## Tính năng
+## Features
 
-### ✅ Đã hoàn thành
-- [x] Import profile WireGuard (.conf)
-- [x] Drag & Drop support cho file .conf
-- [x] Quản lý trạng thái profile (JSON)
-- [x] Tự động tìm port trống
-- [x] Kết nối/ngắt kết nối profile
-- [x] Kiểm tra trạng thái process
-- [x] Giao diện PyQt6 thân thiện
-- [x] Kiểm tra trùng lặp profile
-- [x] Thông báo kết quả import
- - [x] Ghi đè port trong phạm vi app quản lý (xác nhận → ngắt profile cũ → dùng lại port)
- - [x] Chọn loại proxy (SOCKS5/HTTP) và áp dụng vào cấu hình WireProxy
- - [x] Xóa profile (context menu)
- - [x] Chỉnh sửa profile (context menu)
- - [x] Chọn port nhanh trong giới hạn (context menu)
- - [x] Giới hạn số port đang hoạt động (UI)
+### ✅ Done
+- [x] Import WireGuard profiles (.conf)
+- [x] Drag & Drop support
+- [x] Persist profile states (JSON)
+- [x] Auto-pick free port
+- [x] Connect/Disconnect
+- [x] Process status check
+- [x] PyQt6 UI
+- [x] Duplicate detection
+- [x] Import notifications
+- [x] Port override within app (confirm → disconnect old → reuse port)
+- [x] Proxy type selection (SOCKS5/HTTP)
+- [x] Delete/Edit profile (context menu)
+- [x] Quick port picking within limit (context menu)
+- [x] Limit active ports (UI)
 
-### 🔄 Có thể mở rộng
+### 🔄 Roadmap
 - [ ] Export profile
 - [ ] Logs viewer
 - [ ] System tray integration
 - [ ] Auto-start profiles
 - [ ] Profile groups/categories
 
-## Xử lý lỗi
+## Troubleshooting
 
-### Lỗi thường gặp:
+Common issues:
 
-1. **"Không tìm thấy binary 'wireproxy' trong PATH!"**
-   - Tải và cài đặt WireProxy binary
-   - Đảm bảo có trong PATH hoặc copy vào thư mục project
+1. **“wireproxy not found in PATH”**
+   - Install WireProxy and ensure it’s in PATH, or select the executable in the app.
 
-2. **"Không tìm thấy cổng trống!"**
-   - Kiểm tra firewall
-   - Thử thay đổi PORT_RANGE trong code nếu cần
+2. **“No free port found”**
+   - Check firewall
+   - Adjust the port range in code if necessary
 
-3. **"Profile đã tồn tại"**
-   - Rename file trước khi import
-   - Hoặc xóa profile cũ trong thư mục profiles/
+3. **“Profile already exists”**
+   - Rename the file before import, or delete the existing one in `profiles/`
 
-4. **"ImportError: cannot import name 'QtWidgets' from 'PyQt6'"**
-   - Cài đặt PyQt6: `pip install PyQt6`
-   - Activate virtual environment
+4. **“ImportError: cannot import name 'QtWidgets' from 'PyQt6'”**
+   - Install PyQt6: `pip install PyQt6`
+   - Activate the virtual environment
 
-## File cấu hình WireGuard mẫu
+## Sample WireGuard config
 
 ```ini
 [Interface]
@@ -198,32 +179,32 @@ Endpoint = <server>:2408
 AllowedIPs = 0.0.0.0/0
 ```
 
-## Phát triển
+## Development
 
-### Cấu trúc code:
-- `WireProxyManager`: Class chính quản lý GUI
-- `load_state()`: Tải trạng thái từ JSON
-- `save_state()`: Lưu trạng thái vào JSON
-- `import_profile_file()`: Import một file profile
-- `connect_profile()`: Khởi động WireProxy cho profile
-- `disconnect_profile()`: Dừng WireProxy process
+### Code structure
+- `WireProxyManager`: main GUI class
+- `load_state()`: load state from JSON
+- `save_state()`: persist state to JSON
+- `import_profile_file()`: import a profile
+- `connect_profile()`: start WireProxy for a profile
+- `disconnect_profile()`: stop WireProxy process
 
-### Thêm tính năng mới:
-1. Fork repository
-2. Tạo branch mới
-3. Implement tính năng
-4. Test kỹ lưỡng
-5. Submit pull request
+### Contributing
+1. Fork
+2. Create a feature branch
+3. Implement
+4. Test thoroughly
+5. Open a pull request
 
-## Liên hệ & Hỗ trợ
+## Support
 
-- **GitHub Issues**: Báo cáo bug hoặc yêu cầu tính năng
-- **Discussions**: Thảo luận chung về project
+- **GitHub Issues**: bug reports and feature requests
+- **Discussions**: general discussions
 
 ## License
 
-MIT License - Xem file LICENSE để biết chi tiết.
+MIT License — see `LICENSE` for details.
 
 ---
 
-**Lưu ý**: Đảm bảo bạn có quyền sử dụng VPN và tuân thủ luật pháp địa phương khi sử dụng WireGuard.
+Note: Ensure you have the right to use VPNs and comply with local laws when using WireGuard.

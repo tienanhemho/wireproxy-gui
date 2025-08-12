@@ -47,30 +47,30 @@ class WireProxyManager(QtWidgets.QMainWindow):
         self.setWindowTitle("WireProxy GUI Manager")
         self.resize(820, 480)
         
-        # Kích hoạt drag and drop
+        # Enable drag and drop
         self.setAcceptDrops(True)
 
         os.makedirs(PROFILE_DIR, exist_ok=True)
         self.state = self.load_state()
-        # Cập nhật mức log theo state
+        # Update logger level from state
         self.update_logger_level_from_state()
 
         self.table = QtWidgets.QTableWidget()
         self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["Tên Profile", "Port Proxy", "Trạng thái"])
+        self.table.setHorizontalHeaderLabels(["Profile Name", "Proxy Port", "Status"])
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.on_table_context_menu)
 
-        import_btn = QtWidgets.QPushButton("Kéo thả file .conf vào màn hình hoặc nhấn để chọn")
+        import_btn = QtWidgets.QPushButton("Drag and drop a .conf here or click to choose")
         import_btn.clicked.connect(self.import_profile)
 
-        # Hàng cấu hình giới hạn port + loại proxy
+        # Port limit + proxy type + logging row
         limit_layout = QtWidgets.QHBoxLayout()
 
         # Port limit
-        limit_layout.addWidget(QtWidgets.QLabel("Giới hạn số port đang hoạt động (0 = không giới hạn):"))
+        limit_layout.addWidget(QtWidgets.QLabel("Active ports limit (0 = unlimited):"))
         self.port_limit_spin = QtWidgets.QSpinBox()
         self.port_limit_spin.setRange(0, 10000)
         self.port_limit_spin.setValue(int(self.state.get("port_limit", 10)))
@@ -79,7 +79,7 @@ class WireProxyManager(QtWidgets.QMainWindow):
 
         # Proxy type selector
         limit_layout.addSpacing(16)
-        limit_layout.addWidget(QtWidgets.QLabel("Loại proxy:"))
+        limit_layout.addWidget(QtWidgets.QLabel("Proxy type:"))
         self.proxy_type_combo = QtWidgets.QComboBox()
         self.proxy_type_combo.addItems(["SOCKS5", "HTTP"])
         current_type = (self.state.get("proxy_type") or "socks").lower()
@@ -89,7 +89,7 @@ class WireProxyManager(QtWidgets.QMainWindow):
 
         # Logging toggle
         limit_layout.addSpacing(16)
-        self.logging_checkbox = QtWidgets.QCheckBox("Ghi log")
+        self.logging_checkbox = QtWidgets.QCheckBox("Logging")
         self.logging_checkbox.setChecked(bool(self.state.get("logging_enabled", True)))
         self.logging_checkbox.stateChanged.connect(self.on_logging_change)
         limit_layout.addWidget(self.logging_checkbox)
@@ -105,7 +105,7 @@ class WireProxyManager(QtWidgets.QMainWindow):
         container.setLayout(layout)
         self.setCentralWidget(container)
 
-        # Dọn rác file tạm wireproxy cũ (nếu có)
+        # Cleanup old temporary wireproxy files (if any)
         self.cleanup_temp_wireproxy_confs()
         self.load_profiles()
 
@@ -157,16 +157,16 @@ class WireProxyManager(QtWidgets.QMainWindow):
                     data = json.load(f)
                     # Versioning + migration
                     if not isinstance(data, dict):
-                        LOGGER.warning("state.json không phải dạng dict. Dùng default_state.")
+                        LOGGER.warning("state.json is not a dict. Using default_state.")
                         return default_state
                     data.setdefault("version", 0)
                     if int(data.get("version", 0) or 0) < STATE_VERSION:
-                        LOGGER.info("Phát hiện state.json version cũ. Tiến hành migrate…")
+                        LOGGER.info("Detected old state.json version. Migrating…")
                         data = self.migrate_state(data)
-                    # Merge mặc định
+                    # Merge with defaults
                     for k, v in default_state.items():
                         data.setdefault(k, v)
-                    # Bổ sung key mặc định cho từng profile
+                    # Ensure default keys for each profile entry
                     for p in data.get("profiles", []):
                         p.setdefault("proxy_port", None)
                         p.setdefault("pid", None)
@@ -176,7 +176,7 @@ class WireProxyManager(QtWidgets.QMainWindow):
                     LOGGER.debug(f"State loaded: port_limit={data.get('port_limit')}, proxy_type={data.get('proxy_type')}, profiles={len(data.get('profiles', []))}")
                     return data
                 except:
-                    LOGGER.exception("Lỗi đọc state.json. Dùng default_state.")
+                    LOGGER.exception("Error reading state.json. Using default_state.")
                     return default_state
         return default_state
 
@@ -202,7 +202,7 @@ class WireProxyManager(QtWidgets.QMainWindow):
         logger.setLevel(logging.DEBUG if enabled else logging.CRITICAL)
 
     def migrate_state(self, data: dict) -> dict:
-        """Nâng cấp state cũ lên schema mới theo STATE_VERSION. Sẽ backup file cũ trước khi ghi."""
+        """Upgrade old state to new schema version. Backs up the current file before writing."""
         try:
             if os.path.exists(STATE_FILE):
                 ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -211,15 +211,15 @@ class WireProxyManager(QtWidgets.QMainWindow):
             pass
 
         current = int(data.get("version", 0) or 0)
-        # Thực hiện lần lượt từng bước migrate cho tới STATE_VERSION
+        # Stepwise migration until STATE_VERSION
         while current < STATE_VERSION:
             # Ví dụ nếu có thay đổi ở các version sau, xử lý tại đây
             if current < 1:
-                # v1: khởi tạo schema cơ bản, không đổi gì thêm
+                # v1: baseline
                 current = 1
                 continue
             if current < 2:
-                # v2: thêm cấu hình loại proxy ở state (mặc định socks)
+                # v2: add proxy_type (default socks)
                 try:
                     if not isinstance(data, dict):
                         data = {}
@@ -229,7 +229,7 @@ class WireProxyManager(QtWidgets.QMainWindow):
                 current = 2
                 continue
             if current < 3:
-                # v3: thêm logging_enabled (mặc định True)
+                # v3: add logging_enabled (default True)
                 try:
                     if not isinstance(data, dict):
                         data = {}
@@ -242,7 +242,7 @@ class WireProxyManager(QtWidgets.QMainWindow):
             break
 
         data["version"] = STATE_VERSION
-        # Ghi ngay sau migrate để đảm bảo file trên đĩa đã cập nhật
+        # Persist migrated state to disk
         try:
             with open(STATE_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -256,35 +256,35 @@ class WireProxyManager(QtWidgets.QMainWindow):
 
     # ==== WireProxy path helpers ====
     def ensure_wireproxy_path(self) -> str | None:
-        """Đảm bảo có đường dẫn wireproxy hợp lệ: ưu tiên state, nếu không thì dò PATH, nếu vẫn không có thì hỏi người dùng chọn."""
-        # 1) state lưu sẵn
+        """Ensure a valid wireproxy path: prefer saved path, then search PATH, otherwise ask the user to choose."""
+        # 1) saved in state
         path = self.state.get("wireproxy_path")
         if path and os.path.exists(path):
             LOGGER.debug(f"Dùng wireproxy từ state: {path}")
             return path
-        # 2) thử dò trong PATH
+        # 2) search in PATH
         guessed = shutil.which("wireproxy") or shutil.which("wireproxy.exe")
         if guessed and os.path.exists(guessed):
             self.state["wireproxy_path"] = guessed
             self.save_state()
             LOGGER.info(f"Tìm thấy wireproxy trong PATH: {guessed}")
             return guessed
-        # 3) hỏi người dùng chọn
+        # 3) ask the user to pick
         file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
-            "Chọn file thực thi WireProxy",
+            "Choose WireProxy executable",
             "",
             "WireProxy Executable (wireproxy*);;All Files (*)",
         )
         if not file_path:
-            QtWidgets.QMessageBox.warning(self, "Thiếu WireProxy", "Vui lòng chọn file thực thi WireProxy để tiếp tục.")
+            QtWidgets.QMessageBox.warning(self, "Missing WireProxy", "Please select the WireProxy executable to continue.")
             return None
         if not os.path.exists(file_path):
-            QtWidgets.QMessageBox.critical(self, "Lỗi", "Đường dẫn WireProxy không hợp lệ.")
+            QtWidgets.QMessageBox.critical(self, "Error", "Invalid WireProxy path.")
             return None
         self.state["wireproxy_path"] = file_path
         self.save_state()
-        LOGGER.info(f"Người dùng chọn wireproxy: {file_path}")
+        LOGGER.info(f"User selected wireproxy: {file_path}")
         return file_path
 
     def choose_wireproxy_path(self):
@@ -301,7 +301,7 @@ class WireProxyManager(QtWidgets.QMainWindow):
             return
         self.state["wireproxy_path"] = file_path
         self.save_state()
-        QtWidgets.QMessageBox.information(self, "Đã lưu", f"Đã thiết lập WireProxy: {file_path}")
+        QtWidgets.QMessageBox.information(self, "Saved", f"WireProxy path set: {file_path}")
 
     # ==== Port helpers ====
     def get_allowed_ports(self):
@@ -309,7 +309,7 @@ class WireProxyManager(QtWidgets.QMainWindow):
         if limit and limit > 0:
             end = min(PORT_RANGE[0] + limit - 1, PORT_RANGE[1])
             return range(PORT_RANGE[0], end + 1)
-        # Không giới hạn → toàn bộ range
+        # No limit → entire range
         return range(PORT_RANGE[0], PORT_RANGE[1] + 1)
 
     def get_ports_in_use(self):
@@ -355,7 +355,7 @@ class WireProxyManager(QtWidgets.QMainWindow):
         return None
 
     def load_profiles(self):
-        # Quét thư mục profiles/ và state.json
+        # Scan profiles/ and state.json
         profiles = []
         for file in os.listdir(PROFILE_DIR):
             if file.endswith(".conf"):
@@ -389,7 +389,7 @@ class WireProxyManager(QtWidgets.QMainWindow):
                     QtWidgets.QTableWidgetItem(str(profile["proxy_port"]) if profile["proxy_port"] else "—"),
                 )
                 status_text = "Đang chạy" if self.is_process_running(profile.get("pid")) else "Chưa chạy"
-                self.table.setItem(row, 2, QtWidgets.QTableWidgetItem(status_text))
+            self.table.setItem(row, 2, QtWidgets.QTableWidgetItem(status_text))
             self.save_state()
         except KeyboardInterrupt:
             LOGGER.warning("Refresh table interrupted by user")
@@ -476,7 +476,7 @@ class WireProxyManager(QtWidgets.QMainWindow):
                 act_logs = menu.addAction("Mở thư mục logs…")
                 act_logs.triggered.connect(self.open_logs_folder)
 
-            # Không để chuột phải tạo ra KeyboardInterrupt ảnh hưởng UI
+            # Prevent right-click from causing KeyboardInterrupt to affect UI
             QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.ArrowCursor)
             try:
                 menu.exec(self.table.viewport().mapToGlobal(pos))
@@ -484,10 +484,10 @@ class WireProxyManager(QtWidgets.QMainWindow):
                 QtWidgets.QApplication.restoreOverrideCursor()
         except BaseException as e:
             if isinstance(e, KeyboardInterrupt):
-                LOGGER.warning("on_table_context_menu bị KeyboardInterrupt")
+                LOGGER.warning("on_table_context_menu got KeyboardInterrupt")
                 return
-            LOGGER.exception("Lỗi khi hiển thị context menu")
-            QtWidgets.QMessageBox.critical(self, "Lỗi", "Đã xảy ra lỗi khi hiển thị menu chuột phải. Xem logs/app.log để biết chi tiết.")
+            LOGGER.exception("Error displaying context menu")
+            QtWidgets.QMessageBox.critical(self, "Error", "An error occurred while showing the context menu. Check logs/app.log for details.")
 
     def prompt_and_connect_port_row(self, row: int):
         port_str, ok = QtWidgets.QInputDialog.getText(self, "Chọn port", "Nhập port trong giới hạn:")
@@ -506,8 +506,8 @@ class WireProxyManager(QtWidgets.QMainWindow):
         self.refresh_table()
 
     def auto_connect_up_to_limit(self):
-        # Kết nối lần lượt theo thứ tự bảng, tới khi hết port trong giới hạn
-        # Không quét OS hàng loạt; chỉ kiểm tra khi kết nối từng profile
+        # Connect sequentially until reaching limit.
+        # Do not mass-scan OS ports; only check when connecting each profile.
         used_before = len(self.get_ports_in_use())
         limit = int(self.state.get("port_limit", 0))
         if limit and used_before >= limit:
@@ -537,11 +537,11 @@ class WireProxyManager(QtWidgets.QMainWindow):
         except KeyboardInterrupt:
             LOGGER.warning("toggle_connection interrupted by user")
         except Exception:
-            LOGGER.exception("Lỗi khi toggle_connection")
-            QtWidgets.QMessageBox.critical(self, "Lỗi", "Có lỗi khi thao tác kết nối/ngắt kết nối. Xem logs/app.log để biết chi tiết.")
+            LOGGER.exception("Error in toggle_connection")
+            QtWidgets.QMessageBox.critical(self, "Error", "An error occurred during connect/disconnect. Check logs/app.log for details.")
 
     def pick_port_for_profile(self, profile):
-        """Ưu tiên dùng last_port nếu hợp lệ; nếu không tìm port trống mới."""
+        """Prefer using last_port if valid; otherwise find a new free port."""
         last_port = profile.get("last_port") or profile.get("proxy_port")
         if last_port:
             allowed = set(self.get_allowed_ports())
@@ -550,17 +550,17 @@ class WireProxyManager(QtWidgets.QMainWindow):
         return self.find_free_port()
 
     def connect_profile_with_port(self, profile, port: int):
-        # Đảm bảo file cấu hình tồn tại
+        # Ensure configuration exists
         if not self.ensure_profile_conf_exists(profile):
             return
         # Kiểm tra port thuộc giới hạn và còn trống
         allowed = set(self.get_allowed_ports())
         if port not in allowed:
-            QtWidgets.QMessageBox.warning(self, "Ngoài giới hạn", f"Port {port} không nằm trong giới hạn hiện tại.")
-            LOGGER.warning(f"Yêu cầu ngoài giới hạn: port={port}")
+            QtWidgets.QMessageBox.warning(self, "Out of limit", f"Port {port} is not within the current limit.")
+            LOGGER.warning(f"Out-of-limit request: port={port}")
             return
-        # Xử lý ghi đè: nếu port đang dùng bởi profile khác do app quản lý → hỏi xác nhận và disconnect
-        # 1) Tìm profile khác đang dùng port này (trong app)
+        # Handle override: if port used by another app-managed profile → confirm and disconnect it
+        # 1) Find other profile using this port (within app)
         other_profile_using_port = None
         for p in self.state["profiles"]:
             if p is profile:
@@ -571,35 +571,35 @@ class WireProxyManager(QtWidgets.QMainWindow):
                     break
             except Exception:
                 pass
-        # 2) Nếu có profile khác đang dùng → hỏi xác nhận ghi đè
+        # 2) If another profile uses it → ask to override
         if other_profile_using_port is not None:
             reply = QtWidgets.QMessageBox.question(
                 self,
-                "Ghi đè port",
-                f"Port {port} đang được sử dụng bởi profile '{other_profile_using_port['name']}'.\n"
-                "Bạn có muốn ngắt kết nối profile đó và dùng port này không?",
+                "Override port",
+                f"Port {port} is being used by profile '{other_profile_using_port['name']}'.\n"
+                "Do you want to disconnect it and use this port?",
                 QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
                 QtWidgets.QMessageBox.StandardButton.No,
             )
             if reply != QtWidgets.QMessageBox.StandardButton.Yes:
                 return
-            # Ngắt profile cũ
+            # Disconnect the old profile
             self.disconnect_profile(other_profile_using_port)
-            # Kiểm tra lại: nếu vẫn bận thì không thể ghi đè (do process ngoài app)
+            # Re-check: if still busy it is an external process
             if not self.is_port_free_os(port):
-                QtWidgets.QMessageBox.critical(self, "Port bận", f"Không thể dùng port {port} vì đang bận bởi tiến trình khác.")
-                LOGGER.error(f"Ghi đè thất bại: port {port} bận bởi tiến trình ngoài app")
+                QtWidgets.QMessageBox.critical(self, "Busy port", f"Cannot use port {port} because another process is using it.")
+                LOGGER.error(f"Override failed: port {port} busy by external process")
                 return
         else:
-            # Không có profile nào của app dùng; nếu OS báo bận → process ngoài app, chặn
+            # No app profile using it; if OS says busy → external process, block
             if not self.is_port_free_os(port):
-                QtWidgets.QMessageBox.warning(self, "Port bận", f"Port {port} đang được sử dụng bởi tiến trình khác.")
-                LOGGER.warning(f"Port {port} bận bởi tiến trình ngoài app")
+                QtWidgets.QMessageBox.warning(self, "Busy port", f"Port {port} is used by another process.")
+                LOGGER.warning(f"Port {port} busy by external process")
                 return
-            # Và nếu vì lý do nào đó port nằm trong get_ports_in_use (không nên xảy ra) thì chặn dự phòng
+            # Defensive: if appears in get_ports_in_use, block
             if port in self.get_ports_in_use():
-                QtWidgets.QMessageBox.warning(self, "Port bận", f"Port {port} đang được sử dụng.")
-                LOGGER.warning(f"Port {port} nằm trong danh sách đang dùng (bất thường)")
+                QtWidgets.QMessageBox.warning(self, "Busy port", f"Port {port} is in use.")
+                LOGGER.warning(f"Port {port} appears in in-use set (unexpected)")
                 return
         # Đảm bảo có wireproxy
         wireproxy_path = self.ensure_wireproxy_path()
@@ -629,15 +629,15 @@ class WireProxyManager(QtWidgets.QMainWindow):
                         pass
             else:
                 proc = subprocess.Popen([wireproxy_path, "-c", temp_conf], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
-            # Đợi ngắn để phát hiện thoát sớm
+            # Short wait to detect early exit
             time.sleep(0.25)
             if proc.poll() is not None:
                 LOGGER.error(f"wireproxy exited immediately for '{profile['name']}' with code {proc.returncode}")
-                QtWidgets.QMessageBox.critical(self, "WireProxy lỗi", f"WireProxy đã thoát ngay (mã {proc.returncode}). Xem log: {log_path}")
+                QtWidgets.QMessageBox.critical(self, "WireProxy error", f"WireProxy exited immediately (code {proc.returncode}). See log: {log_path}")
                 return
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Lỗi", f"Không chạy được WireProxy: {e}")
-            LOGGER.exception(f"Không chạy được WireProxy cho '{profile['name']}'")
+            QtWidgets.QMessageBox.critical(self, "Error", f"Failed to start WireProxy: {e}")
+            LOGGER.exception(f"Failed to start WireProxy for '{profile['name']}'")
             return
         profile["proxy_port"] = int(port)
         profile["last_port"] = int(port)
@@ -646,7 +646,7 @@ class WireProxyManager(QtWidgets.QMainWindow):
         LOGGER.info(f"wireproxy started: pid={proc.pid}, profile='{profile['name']}', port={port}")
 
     def connect_profile(self, profile):
-        # Đảm bảo file cấu hình tồn tại, nếu thiếu cho phép liên kết lại hoặc xóa
+        # Ensure configuration exists; allow relink or delete if missing
         if not self.ensure_profile_conf_exists(profile):
             return
         
@@ -686,11 +686,11 @@ class WireProxyManager(QtWidgets.QMainWindow):
             time.sleep(0.25)
             if proc.poll() is not None:
                 LOGGER.error(f"wireproxy exited immediately for '{profile['name']}' with code {proc.returncode}")
-                QtWidgets.QMessageBox.critical(self, "WireProxy lỗi", f"WireProxy đã thoát ngay (mã {proc.returncode}). Xem log: {log_path}")
+            QtWidgets.QMessageBox.critical(self, "WireProxy error", f"WireProxy exited immediately (code {proc.returncode}). See log: {log_path}")
                 return
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Lỗi", f"Không chạy được WireProxy: {e}")
-            LOGGER.exception(f"Không chạy được WireProxy cho '{profile['name']}'")
+            QtWidgets.QMessageBox.critical(self, "Error", f"Failed to start WireProxy: {e}")
+            LOGGER.exception(f"Failed to start WireProxy for '{profile['name']}'")
             return
 
         profile["proxy_port"] = int(port)
@@ -706,7 +706,7 @@ class WireProxyManager(QtWidgets.QMainWindow):
                 self._terminate_process(pid)
             except Exception:
                 LOGGER.exception(f"Lỗi khi kill pid={pid}")
-        # Lưu last_port trước khi xóa proxy_port
+        # Save last_port before clearing proxy_port
         if profile.get("proxy_port"):
             profile["last_port"] = int(profile["proxy_port"])
         profile["pid"] = None
@@ -714,7 +714,7 @@ class WireProxyManager(QtWidgets.QMainWindow):
         profile["running"] = False
 
     def generate_wireproxy_conf(self, wg_conf, port, output_conf, proxy_type: str = "socks"):
-        # Theo whyvl/wireproxy: dùng WGConfig + section [Socks5] hoặc [http]
+        # According to whyvl/wireproxy: use WGConfig + [Socks5] or [http]
         section = "http" if str(proxy_type).lower() == "http" else "Socks5"
         with open(output_conf, "w", encoding="utf-8") as f:
             f.write(f"WGConfig = {wg_conf}\n\n")
@@ -728,9 +728,9 @@ class WireProxyManager(QtWidgets.QMainWindow):
             pass
 
     def dragEnterEvent(self, event):
-        """Xử lý khi file được kéo vào cửa sổ"""
+        """Handle when files are dragged into the window"""
         if event.mimeData().hasUrls():
-            # Kiểm tra xem có file .conf không
+            # Check for .conf files
             for url in event.mimeData().urls():
                 if url.toLocalFile().endswith('.conf'):
                     event.acceptProposedAction()
@@ -738,7 +738,7 @@ class WireProxyManager(QtWidgets.QMainWindow):
         event.ignore()
 
     def dragMoveEvent(self, event):
-        """Xử lý khi file đang được kéo di chuyển trong cửa sổ"""
+        """Handle when dragged files move within the window"""
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
                 if url.toLocalFile().endswith('.conf'):
@@ -747,7 +747,7 @@ class WireProxyManager(QtWidgets.QMainWindow):
         event.ignore()
 
     def dropEvent(self, event):
-        """Xử lý khi file được thả vào cửa sổ"""
+        """Handle when files are dropped into the window"""
         if event.mimeData().hasUrls():
             files_imported = 0
             files_skipped = 0
@@ -763,42 +763,41 @@ class WireProxyManager(QtWidgets.QMainWindow):
                             files_skipped += 1
                     except Exception as e:
                         files_skipped += 1
-                        print(f"Lỗi import file {file_path}: {e}")
+                        print(f"Import error for file {file_path}: {e}")
             
-            # Hiển thị thông báo kết quả
+            # Show result notification
             if files_imported > 0:
-                msg = f"Đã import thành công {files_imported} profile"
+                msg = f"Imported {files_imported} profile(s) successfully"
                 if files_skipped > 0:
-                    msg += f" ({files_skipped} file bị bỏ qua do trùng tên hoặc lỗi)"
-                QtWidgets.QMessageBox.information(self, "Import thành công", msg)
+                    msg += f" ({files_skipped} file(s) skipped due to duplicate or error)"
+                QtWidgets.QMessageBox.information(self, "Import succeeded", msg)
                 self.refresh_table()
             elif files_skipped > 0:
-                QtWidgets.QMessageBox.warning(self, "Import thất bại", 
-                                            f"{files_skipped} file không thể import (có thể do trùng tên hoặc lỗi)")
+                QtWidgets.QMessageBox.warning(self, "Import failed", 
+                                            f"{files_skipped} file(s) could not be imported (duplicate or error)")
             
             event.acceptProposedAction()
 
     def import_profile_file(self, file_path):
-        """Import một file profile cụ thể"""
+        """Import a specific profile .conf file"""
         name = os.path.splitext(os.path.basename(file_path))[0]
         
-        # Kiểm tra xem profile đã tồn tại chưa
-        # Chặn tên dự phòng cho file tạm
+        # Prevent reserved temp suffix and duplicates
         if name.endswith("_wireproxy"):
             return False
         if any(p["name"] == name for p in self.state["profiles"]):
-            return False  # Profile đã tồn tại
+            return False
         
         dest_path = os.path.join(PROFILE_DIR, os.path.basename(file_path))
         
-        # Kiểm tra file đích đã tồn tại chưa
+        # Ensure destination file does not exist
         if os.path.exists(dest_path):
-            return False  # File đã tồn tại
+            return False
         
         # Copy file
         shutil.copy(file_path, dest_path)
         
-        # Thêm vào state
+        # Append to state
         self.state["profiles"].append({
             "name": name,
             "conf_path": dest_path,
@@ -811,76 +810,76 @@ class WireProxyManager(QtWidgets.QMainWindow):
         return True
 
     def import_profile(self):
-        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Chọn file WireGuard .conf", "", "WireGuard Config (*.conf)")
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Choose WireGuard .conf", "", "WireGuard Config (*.conf)")
         if file_path:
             success = self.import_profile_file(file_path)
             if success:
-                QtWidgets.QMessageBox.information(self, "Thành công", "Profile đã được import thành công!")
+                QtWidgets.QMessageBox.information(self, "Success", "Profile imported successfully!")
                 self.refresh_table()
             else:
-                QtWidgets.QMessageBox.warning(self, "Thất bại", "Profile đã tồn tại hoặc có lỗi xảy ra!")
+                QtWidgets.QMessageBox.warning(self, "Failed", "Profile already exists or an error occurred!")
 
     def edit_profile(self, row: int):
         profile = self.state["profiles"][row]
-        # Không cho sửa khi đang chạy
+        # Disallow editing while running
         if self.is_process_running(profile.get("pid")):
-            QtWidgets.QMessageBox.warning(self, "Đang chạy", "Vui lòng Disconnect profile trước khi sửa.")
+            QtWidgets.QMessageBox.warning(self, "Running", "Please disconnect the profile before editing.")
             return
         
-        # Đảm bảo file cấu hình tồn tại, nếu thiếu cho phép liên kết lại hoặc xóa
+        # Ensure config exists; allow relink or delete if missing
         if not self.ensure_profile_conf_exists(profile):
             return
         
-        # Đọc nội dung file .conf
+        # Read .conf contents
         try:
             with open(profile["conf_path"], "r", encoding="utf-8") as f:
                 current_content = f.read()
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Lỗi", f"Không thể đọc file cấu hình: {e}")
+            QtWidgets.QMessageBox.critical(self, "Error", f"Cannot read config file: {e}")
             return
-        # Mở dialog sửa
+        # Open edit dialog
         dialog = EditProfileDialog(self, current_name=profile["name"], conf_content=current_content)
         if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             new_name = dialog.get_profile_name().strip()
             new_content = dialog.get_conf_content()
             if not new_name:
-                QtWidgets.QMessageBox.warning(self, "Thiếu tên", "Tên profile không được để trống.")
+                QtWidgets.QMessageBox.warning(self, "Missing name", "Profile name cannot be empty.")
                 return
-            # Xử lý đổi tên nếu cần
+            # Handle rename if needed
             if new_name != profile["name"]:
                 if new_name.endswith("_wireproxy"):
-                    QtWidgets.QMessageBox.warning(self, "Tên không hợp lệ", "Tên profile không được kết thúc bằng '_wireproxy'.")
+                    QtWidgets.QMessageBox.warning(self, "Invalid name", "Profile name must not end with '_wireproxy'.")
                     return
                 if any(p["name"] == new_name for p in self.state["profiles"]):
-                    QtWidgets.QMessageBox.warning(self, "Trùng tên", "Đã tồn tại profile với tên này.")
+                    QtWidgets.QMessageBox.warning(self, "Duplicate name", "A profile with this name already exists.")
                     return
                 new_conf_path = os.path.join(PROFILE_DIR, f"{new_name}.conf")
                 if os.path.exists(new_conf_path):
-                    QtWidgets.QMessageBox.warning(self, "Tệp tồn tại", "Đã tồn tại file .conf với tên này trong thư mục profiles.")
+                    QtWidgets.QMessageBox.warning(self, "File exists", "A .conf with this name already exists in profiles.")
                     return
                 try:
                     os.rename(profile["conf_path"], new_conf_path)
                 except Exception as e:
-                    QtWidgets.QMessageBox.critical(self, "Lỗi", f"Không thể đổi tên file: {e}")
+                    QtWidgets.QMessageBox.critical(self, "Error", f"Cannot rename file: {e}")
                     return
                 profile["name"] = new_name
                 profile["conf_path"] = new_conf_path
-            # Ghi nội dung mới vào file
+            # Write new content back
             try:
                 with open(profile["conf_path"], "w", encoding="utf-8") as f:
                     f.write(new_content)
             except Exception as e:
-                QtWidgets.QMessageBox.critical(self, "Lỗi", f"Không thể lưu file cấu hình: {e}")
+                QtWidgets.QMessageBox.critical(self, "Error", f"Cannot save config file: {e}")
                 return
-            QtWidgets.QMessageBox.information(self, "Đã lưu", "Profile đã được cập nhật thành công.")
+            QtWidgets.QMessageBox.information(self, "Saved", "Profile updated successfully.")
             self.refresh_table()
 
     def delete_profile(self, row: int):
         profile = self.state["profiles"][row]
         reply = QtWidgets.QMessageBox.question(
             self,
-            "Xóa profile",
-            f"Bạn có chắc muốn xóa '{profile['name']}'?",
+            "Delete profile",
+            f"Are you sure you want to delete '{profile['name']}'?",
             QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
             QtWidgets.QMessageBox.StandardButton.No,
         )
@@ -911,25 +910,25 @@ class WireProxyManager(QtWidgets.QMainWindow):
         self.save_state()
 
     def ensure_profile_conf_exists(self, profile) -> bool:
-        """Đảm bảo file cấu hình tồn tại. Nếu không, cho phép người dùng:
-        - Chọn file .conf thay thế (copy vào thư mục profiles và cập nhật đường dẫn)
-        - Xóa profile
-        Trả về True nếu sau cùng có file hợp lệ, ngược lại False."""
+        """Ensure the profile config file exists. If missing, allow the user to:
+        - Pick a replacement .conf (copy into profiles and update path)
+        - Delete the profile
+        Return True if a valid file exists after handling, else False."""
         conf_path = profile.get("conf_path")
         if conf_path and os.path.exists(conf_path):
             return True
 
         msg = QtWidgets.QMessageBox(self)
         msg.setIcon(QtWidgets.QMessageBox.Icon.Warning)
-        msg.setWindowTitle("Không tìm thấy file")
-        msg.setText("File cấu hình không tồn tại. Bạn muốn làm gì?")
-        choose_btn = msg.addButton("Chọn file", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
-        delete_btn = msg.addButton("Xóa profile", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
-        cancel_btn = msg.addButton("Hủy", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        msg.setWindowTitle("File missing")
+        msg.setText("Config file not found. What would you like to do?")
+        choose_btn = msg.addButton("Choose file", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        delete_btn = msg.addButton("Delete profile", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
+        cancel_btn = msg.addButton("Cancel", QtWidgets.QMessageBox.ButtonRole.RejectRole)
         msg.exec()
         clicked = msg.clickedButton()
         if clicked == choose_btn:
-            file_path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Chọn file WireGuard .conf", "", "WireGuard Config (*.conf)")
+            file_path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Choose WireGuard .conf", "", "WireGuard Config (*.conf)")
             if not file_path:
                 return False
             try:
@@ -940,7 +939,7 @@ class WireProxyManager(QtWidgets.QMainWindow):
                 self.save_state()
                 return True
             except Exception as e:
-                QtWidgets.QMessageBox.critical(self, "Lỗi", f"Không thể sao chép file: {e}")
+                QtWidgets.QMessageBox.critical(self, "Error", f"Failed to copy file: {e}")
                 return False
         if clicked == delete_btn:
             self._delete_profile(profile)
