@@ -16,6 +16,7 @@ PROFILE_DIR = "profiles"
 PORT_RANGE = (60000, 65535)
 STATE_VERSION = 3
 LOG_DIR = "logs"
+TEMP_WIREPROXY_SUFFIX = "_wireproxy.conf"
 
 
 def setup_logging() -> logging.Logger:
@@ -104,6 +105,8 @@ class WireProxyManager(QtWidgets.QMainWindow):
         container.setLayout(layout)
         self.setCentralWidget(container)
 
+        # Dọn rác file tạm wireproxy cũ (nếu có)
+        self.cleanup_temp_wireproxy_confs()
         self.load_profiles()
 
     def get_wireproxy_log_path(self, profile_name: str) -> str:
@@ -132,6 +135,17 @@ class WireProxyManager(QtWidgets.QMainWindow):
                     except Exception:
                         pass
             # Ensure new empty file will be created by writer later
+        except Exception:
+            pass
+
+    def cleanup_temp_wireproxy_confs(self) -> None:
+        try:
+            for file in os.listdir(PROFILE_DIR):
+                if file.endswith(TEMP_WIREPROXY_SUFFIX):
+                    try:
+                        os.remove(os.path.join(PROFILE_DIR, file))
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -345,7 +359,12 @@ class WireProxyManager(QtWidgets.QMainWindow):
         profiles = []
         for file in os.listdir(PROFILE_DIR):
             if file.endswith(".conf"):
+                # Bỏ qua file tạm tạo cho wireproxy
+                if file.endswith(TEMP_WIREPROXY_SUFFIX):
+                    continue
                 name = os.path.splitext(file)[0]
+                if name.endswith("_wireproxy"):
+                    continue
                 existing = next((p for p in self.state["profiles"] if p["name"] == name), None)
                 if not existing:
                     profiles.append({
@@ -360,74 +379,115 @@ class WireProxyManager(QtWidgets.QMainWindow):
         self.refresh_table()
 
     def refresh_table(self):
-        self.table.setRowCount(len(self.state["profiles"]))
-        for row, profile in enumerate(self.state["profiles"]):
-            self.table.setItem(row, 0, QtWidgets.QTableWidgetItem(profile["name"]))
-            self.table.setItem(row, 1, QtWidgets.QTableWidgetItem(str(profile["proxy_port"]) if profile["proxy_port"] else "—"))
-            status_text = "Đang chạy" if self.is_process_running(profile.get("pid")) else "Chưa chạy"
-            self.table.setItem(row, 2, QtWidgets.QTableWidgetItem(status_text))
-        self.save_state()
+        try:
+            self.table.setRowCount(len(self.state["profiles"]))
+            for row, profile in enumerate(self.state["profiles"]):
+                self.table.setItem(row, 0, QtWidgets.QTableWidgetItem(profile["name"]))
+                self.table.setItem(
+                    row,
+                    1,
+                    QtWidgets.QTableWidgetItem(str(profile["proxy_port"]) if profile["proxy_port"] else "—"),
+                )
+                status_text = "Đang chạy" if self.is_process_running(profile.get("pid")) else "Chưa chạy"
+                self.table.setItem(row, 2, QtWidgets.QTableWidgetItem(status_text))
+            self.save_state()
+        except KeyboardInterrupt:
+            LOGGER.warning("Refresh table interrupted by user")
+        except Exception:
+            LOGGER.exception("Lỗi khi refresh_table")
 
     def is_process_running(self, pid):
         if not pid:
             return False
         try:
-            os.kill(pid, 0)
-            return True
-        except:
+            if sys.platform.startswith("win"):
+                # Windows: dùng WinAPI để kiểm tra thay vì os.kill (tránh terminate process)
+                import ctypes
+                import ctypes.wintypes as wt
+
+                PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                STILL_ACTIVE = 259
+                kernel = ctypes.windll.kernel32
+                handle = kernel.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+                if not handle:
+                    return False
+                try:
+                    exit_code = wt.DWORD()
+                    if not kernel.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                        return False
+                    return exit_code.value == STILL_ACTIVE
+                finally:
+                    kernel.CloseHandle(handle)
+            else:
+                # POSIX: tín hiệu 0 để kiểm tra tồn tại
+                os.kill(int(pid), 0)
+                return True
+        except Exception:
             return False
 
     # ==== Context menu ====
     def on_table_context_menu(self, pos: QtCore.QPoint):
-        menu = QtWidgets.QMenu(self)
-        index = self.table.indexAt(pos)
-        row = index.row() if index.isValid() else -1
+        try:
+            menu = QtWidgets.QMenu(self)
+            index = self.table.indexAt(pos)
+            row = index.row() if index.isValid() else -1
 
-        # Khi click trên một hàng
-        if row >= 0:
-            profile = self.state["profiles"][row]
-            running = self.is_process_running(profile.get("pid"))
+            # Khi click trên một hàng
+            if row >= 0:
+                profile = self.state["profiles"][row]
+                running = self.is_process_running(profile.get("pid"))
 
-            if running:
-                act_disconnect = menu.addAction("Disconnect")
-                act_disconnect.triggered.connect(partial(self.toggle_connection, row))
-            else:
-                act_connect = menu.addAction("Connect")
-                act_connect.triggered.connect(partial(self.toggle_connection, row))
-
-                # Nâng cao: chọn port trong giới hạn còn trống (nhanh, không quét OS)
-                advanced = menu.addMenu("Connect (chọn port)")
-                quick_ports = self.get_available_ports_for_menu(max_items=50)
-                if not quick_ports:
-                    disabled = advanced.addAction("Không còn port trống trong giới hạn")
-                    disabled.setEnabled(False)
+                if running:
+                    act_disconnect = menu.addAction("Disconnect")
+                    act_disconnect.triggered.connect(partial(self.toggle_connection, row))
                 else:
-                    for p in quick_ports:
-                        action = advanced.addAction(f"127.0.0.1:{p}")
-                        action.triggered.connect(partial(self.connect_profile_with_port_row, row, int(p)))
-                    if len(quick_ports) >= 50:
-                        more = advanced.addAction("… còn nữa, nhập port cụ thể…")
-                        more.triggered.connect(partial(self.prompt_and_connect_port_row, row))
+                    act_connect = menu.addAction("Connect")
+                    act_connect.triggered.connect(partial(self.toggle_connection, row))
 
-            menu.addSeparator()
-            act_edit = menu.addAction("Sửa")
-            act_edit.triggered.connect(partial(self.edit_profile, row))
+                    # Nâng cao: chọn port trong giới hạn còn trống (nhanh, không quét OS)
+                    advanced = menu.addMenu("Connect (chọn port)")
+                    quick_ports = self.get_available_ports_for_menu(max_items=50)
+                    if not quick_ports:
+                        disabled = advanced.addAction("Không còn port trống trong giới hạn")
+                        disabled.setEnabled(False)
+                    else:
+                        for p in quick_ports:
+                            action = advanced.addAction(f"127.0.0.1:{p}")
+                            action.triggered.connect(partial(self.connect_profile_with_port_row, row, int(p)))
+                        if len(quick_ports) >= 50:
+                            more = advanced.addAction("… còn nữa, nhập port cụ thể…")
+                            more.triggered.connect(partial(self.prompt_and_connect_port_row, row))
 
-            act_delete = menu.addAction("Xóa")
-            act_delete.triggered.connect(partial(self.delete_profile, row))
-        else:
-            # Không nằm trên hàng nào → menu chung
-            act_auto = menu.addAction("Tự động kết nối theo giới hạn")
-            act_auto.triggered.connect(self.auto_connect_up_to_limit)
-            menu.addSeparator()
-            act_import = menu.addAction("Import profile (.conf)")
-            act_import.triggered.connect(self.import_profile)
-            act_cfg = menu.addAction("Cấu hình đường dẫn WireProxy…")
-            act_cfg.triggered.connect(self.choose_wireproxy_path)
-            act_logs = menu.addAction("Mở thư mục logs…")
-            act_logs.triggered.connect(self.open_logs_folder)
+                menu.addSeparator()
+                act_edit = menu.addAction("Sửa")
+                act_edit.triggered.connect(partial(self.edit_profile, row))
 
-        menu.exec(self.table.viewport().mapToGlobal(pos))
+                act_delete = menu.addAction("Xóa")
+                act_delete.triggered.connect(partial(self.delete_profile, row))
+            else:
+                # Không nằm trên hàng nào → menu chung
+                act_auto = menu.addAction("Tự động kết nối theo giới hạn")
+                act_auto.triggered.connect(self.auto_connect_up_to_limit)
+                menu.addSeparator()
+                act_import = menu.addAction("Import profile (.conf)")
+                act_import.triggered.connect(self.import_profile)
+                act_cfg = menu.addAction("Cấu hình đường dẫn WireProxy…")
+                act_cfg.triggered.connect(self.choose_wireproxy_path)
+                act_logs = menu.addAction("Mở thư mục logs…")
+                act_logs.triggered.connect(self.open_logs_folder)
+
+            # Không để chuột phải tạo ra KeyboardInterrupt ảnh hưởng UI
+            QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.ArrowCursor)
+            try:
+                menu.exec(self.table.viewport().mapToGlobal(pos))
+            finally:
+                QtWidgets.QApplication.restoreOverrideCursor()
+        except BaseException as e:
+            if isinstance(e, KeyboardInterrupt):
+                LOGGER.warning("on_table_context_menu bị KeyboardInterrupt")
+                return
+            LOGGER.exception("Lỗi khi hiển thị context menu")
+            QtWidgets.QMessageBox.critical(self, "Lỗi", "Đã xảy ra lỗi khi hiển thị menu chuột phải. Xem logs/app.log để biết chi tiết.")
 
     def prompt_and_connect_port_row(self, row: int):
         port_str, ok = QtWidgets.QInputDialog.getText(self, "Chọn port", "Nhập port trong giới hạn:")
@@ -467,12 +527,18 @@ class WireProxyManager(QtWidgets.QMainWindow):
 
     # ==== Connect/Disconnect ====
     def toggle_connection(self, row):
-        profile = self.state["profiles"][row]
-        if self.is_process_running(profile.get("pid")):
-            self.disconnect_profile(profile)
-        else:
-            self.connect_profile(profile)
-        self.refresh_table()
+        try:
+            profile = self.state["profiles"][row]
+            if self.is_process_running(profile.get("pid")):
+                self.disconnect_profile(profile)
+            else:
+                self.connect_profile(profile)
+            self.refresh_table()
+        except KeyboardInterrupt:
+            LOGGER.warning("toggle_connection interrupted by user")
+        except Exception:
+            LOGGER.exception("Lỗi khi toggle_connection")
+            QtWidgets.QMessageBox.critical(self, "Lỗi", "Có lỗi khi thao tác kết nối/ngắt kết nối. Xem logs/app.log để biết chi tiết.")
 
     def pick_port_for_profile(self, profile):
         """Ưu tiên dùng last_port nếu hợp lệ; nếu không tìm port trống mới."""
@@ -540,7 +606,7 @@ class WireProxyManager(QtWidgets.QMainWindow):
         if not wireproxy_path:
             return
         try:
-            temp_conf = os.path.join(PROFILE_DIR, f"{profile['name']}_wireproxy.conf")
+            temp_conf = os.path.join(PROFILE_DIR, f"{profile['name']}{TEMP_WIREPROXY_SUFFIX}")
             proxy_type = (self.state.get("proxy_type") or "socks").lower()
             self.generate_wireproxy_conf(profile["conf_path"], port, temp_conf, proxy_type)
             log_path = self.get_wireproxy_log_path(profile['name'])
@@ -548,9 +614,9 @@ class WireProxyManager(QtWidgets.QMainWindow):
                 # Rotate profile log if too large
                 self.rotate_profile_log(log_path)
                 with open(log_path, "a", encoding="utf-8") as log_f:
-                log_f.write("\n=== Launch wireproxy ===\n")
-                log_f.write(f"cmd: {wireproxy_path} -c {temp_conf}\n")
-                log_f.write(f"proxy_type: {proxy_type}\n")
+                    log_f.write("\n=== Launch wireproxy ===\n")
+                    log_f.write(f"cmd: {wireproxy_path} -c {temp_conf}\n")
+                    log_f.write(f"proxy_type: {proxy_type}\n")
             LOGGER.info(f"Starting wireproxy for '{profile['name']}' on 127.0.0.1:{port} ({proxy_type}), log={log_path}")
             if bool(self.state.get("logging_enabled", True)):
                 log_f = open(log_path, "a", encoding="utf-8")
@@ -593,7 +659,7 @@ class WireProxyManager(QtWidgets.QMainWindow):
         if not wireproxy_path:
             return
 
-        temp_conf = os.path.join(PROFILE_DIR, f"{profile['name']}_wireproxy.conf")
+        temp_conf = os.path.join(PROFILE_DIR, f"{profile['name']}{TEMP_WIREPROXY_SUFFIX}")
         proxy_type = (self.state.get("proxy_type") or "socks").lower()
         self.generate_wireproxy_conf(profile["conf_path"], port, temp_conf, proxy_type)
 
@@ -602,9 +668,9 @@ class WireProxyManager(QtWidgets.QMainWindow):
             if bool(self.state.get("logging_enabled", True)):
                 self.rotate_profile_log(log_path)
                 with open(log_path, "a", encoding="utf-8") as log_f:
-                log_f.write("\n=== Launch wireproxy ===\n")
-                log_f.write(f"cmd: {wireproxy_path} -c {temp_conf}\n")
-                log_f.write(f"proxy_type: {proxy_type}\n")
+                    log_f.write("\n=== Launch wireproxy ===\n")
+                    log_f.write(f"cmd: {wireproxy_path} -c {temp_conf}\n")
+                    log_f.write(f"proxy_type: {proxy_type}\n")
             LOGGER.info(f"Starting wireproxy for '{profile['name']}' on 127.0.0.1:{port} ({proxy_type}), log={log_path}")
             if bool(self.state.get("logging_enabled", True)):
                 log_f = open(log_path, "a", encoding="utf-8")
@@ -637,8 +703,8 @@ class WireProxyManager(QtWidgets.QMainWindow):
         if pid and self.is_process_running(pid):
             try:
                 LOGGER.info(f"Killing wireproxy pid={pid} for profile='{profile.get('name')}'")
-                os.kill(pid, 9)  # force kill
-            except:
+                self._terminate_process(pid)
+            except Exception:
                 LOGGER.exception(f"Lỗi khi kill pid={pid}")
         # Lưu last_port trước khi xóa proxy_port
         if profile.get("proxy_port"):
@@ -717,6 +783,9 @@ class WireProxyManager(QtWidgets.QMainWindow):
         name = os.path.splitext(os.path.basename(file_path))[0]
         
         # Kiểm tra xem profile đã tồn tại chưa
+        # Chặn tên dự phòng cho file tạm
+        if name.endswith("_wireproxy"):
+            return False
         if any(p["name"] == name for p in self.state["profiles"]):
             return False  # Profile đã tồn tại
         
@@ -779,6 +848,9 @@ class WireProxyManager(QtWidgets.QMainWindow):
                 return
             # Xử lý đổi tên nếu cần
             if new_name != profile["name"]:
+                if new_name.endswith("_wireproxy"):
+                    QtWidgets.QMessageBox.warning(self, "Tên không hợp lệ", "Tên profile không được kết thúc bằng '_wireproxy'.")
+                    return
                 if any(p["name"] == new_name for p in self.state["profiles"]):
                     QtWidgets.QMessageBox.warning(self, "Trùng tên", "Đã tồn tại profile với tên này.")
                     return
@@ -828,7 +900,7 @@ class WireProxyManager(QtWidgets.QMainWindow):
         except Exception:
             pass
         # Xóa file tạm wireproxy nếu có
-        temp_conf = os.path.join(PROFILE_DIR, f"{profile['name']}_wireproxy.conf")
+        temp_conf = os.path.join(PROFILE_DIR, f"{profile['name']}{TEMP_WIREPROXY_SUFFIX}")
         try:
             if os.path.exists(temp_conf):
                 os.remove(temp_conf)
@@ -887,6 +959,24 @@ class WireProxyManager(QtWidgets.QMainWindow):
                 subprocess.Popen(["xdg-open", LOG_DIR])
         except Exception:
             QtWidgets.QMessageBox.warning(self, "Lỗi", f"Không mở được thư mục logs: {LOG_DIR}")
+
+    def _terminate_process(self, pid: int) -> None:
+        """Kết thúc tiến trình theo cách phù hợp hệ điều hành.
+        - Windows: ưu tiên taskkill để chấm dứt cả tiến trình con.
+        - Khác: dùng os.kill(pid, 9)"""
+        if sys.platform.startswith("win"):
+            try:
+                completed = subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True)
+                if completed.returncode == 0:
+                    return
+                LOGGER.warning(f"taskkill trả về {completed.returncode}: {completed.stderr.strip()}")
+            except Exception:
+                LOGGER.exception("taskkill thất bại, fallback sang os.kill")
+        # Fallback chung
+        try:
+            os.kill(int(pid), 9)
+        except Exception:
+            LOGGER.exception("os.kill thất bại khi kết thúc tiến trình")
 
 
 class EditProfileDialog(QtWidgets.QDialog):
