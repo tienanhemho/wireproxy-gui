@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "profiles": [],
+  "port_limit": 10,
+  "wireproxy_path": null
+}
