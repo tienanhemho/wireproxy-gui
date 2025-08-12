@@ -8,6 +8,8 @@ import time
 import logging
 import urllib.request
 import urllib.parse
+import base64
+import io
 from logging.handlers import RotatingFileHandler
 from functools import partial
 from PyQt6 import QtWidgets, QtCore, QtGui
@@ -25,6 +27,7 @@ IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".webp")
 try:
     import cv2  # type: ignore
     _HAVE_CV2 = True
+    import numpy as np  # type: ignore
 except Exception:
     _HAVE_CV2 = False
 
@@ -200,6 +203,9 @@ class WireProxyManager(QtWidgets.QMainWindow):
         except Exception:
             return False
 
+    def _is_data_url(self, s: str) -> bool:
+        return isinstance(s, str) and s.startswith("data:")
+
     def import_profile_text(self, name_hint: str, conf_text: str) -> bool:
         """Create a new profile from raw config text. Returns True on success."""
         if not conf_text or "[Interface]" not in conf_text:
@@ -265,10 +271,21 @@ class WireProxyManager(QtWidgets.QMainWindow):
         try:
             with urllib.request.urlopen(url, timeout=timeout_sec) as resp:
                 raw = resp.read()
+                ctype = resp.headers.get("Content-Type", "").lower()
+                # If it's an image, return as image
+                if ctype.startswith("image/"):
+                    path = urllib.parse.urlparse(url).path
+                    name_hint = os.path.splitext(os.path.basename(path) or "downloaded_image")[0]
+                    # Try decode QR from bytes
+                    text = self._decode_qr_bytes_to_text(raw)
+                    if text:
+                        return (name_hint, text)
+                    QtWidgets.QMessageBox.warning(self, "QR not found", "No QR code detected in the dropped image.")
+                    return None
+                # Else treat as text
                 text = raw.decode("utf-8", errors="ignore")
                 if not text.strip():
                     return None
-                # Derive name from URL path
                 path = urllib.parse.urlparse(url).path
                 name_hint = os.path.splitext(os.path.basename(path) or "downloaded")[0]
                 return (name_hint or "downloaded", text)
@@ -288,16 +305,42 @@ class WireProxyManager(QtWidgets.QMainWindow):
                         if lp.lower().endswith('.conf') or ext in IMAGE_EXTENSIONS:
                             return True
                     s = url.toString()
-                    if s and self._is_http_url(s):
+                    if s and (self._is_http_url(s) or self._is_data_url(s)):
                         return True
             # Some browsers provide only text
             if mime.hasText():
                 t = mime.text().strip()
-                if self._is_http_url(t):
+                if self._is_http_url(t) or self._is_data_url(t):
                     return True
         except Exception:
             pass
         return False
+
+    def _decode_qr_bytes_to_text(self, data: bytes) -> str | None:
+        # Try OpenCV first
+        if _HAVE_CV2:
+            try:
+                arr = np.frombuffer(data, dtype=np.uint8)
+                img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                if img is not None:
+                    detector = cv2.QRCodeDetector()
+                    text, points, _ = detector.detectAndDecode(img)
+                    if isinstance(text, str) and text.strip():
+                        return text.strip()
+            except Exception:
+                pass
+        # Try PIL + pyzbar
+        if _HAVE_PYZBAR:
+            try:
+                with Image.open(io.BytesIO(data)) as im:
+                    results = pyzbar_decode(im)
+                    for r in results:
+                        t = r.data.decode("utf-8", errors="ignore").strip()
+                        if t:
+                            return t
+            except Exception:
+                pass
+        return None
 
     def load_state(self):
         default_state = {"version": STATE_VERSION, "profiles": [], "port_limit": 10, "wireproxy_path": None, "proxy_type": "socks", "logging_enabled": True}
@@ -951,7 +994,36 @@ class WireProxyManager(QtWidgets.QMainWindow):
                     raw_url = url.toString()
                 except Exception:
                     raw_url = ""
-                if raw_url and self._is_http_url(raw_url):
+                if raw_url and (self._is_http_url(raw_url) or self._is_data_url(raw_url)):
+                    # Handle data URLs (inline images or text)
+                    if self._is_data_url(raw_url):
+                        try:
+                            header, b64data = raw_url.split(",", 1)
+                            mediatype = header.split(";")[0][5:].lower() if header.startswith("data:") else ""
+                            data = base64.b64decode(b64data, validate=False)
+                            if mediatype.startswith("image/"):
+                                text = self._decode_qr_bytes_to_text(data)
+                                if text:
+                                    success = self.import_profile_text("qr_image", text)
+                                    files_imported += 1 if success else 0
+                                    files_skipped += 0 if success else 1
+                                    continue
+                                QtWidgets.QMessageBox.warning(self, "QR not found", "No QR code detected in the dropped image.")
+                                files_skipped += 1
+                                continue
+                            # Otherwise treat as UTF-8 text
+                            text = data.decode("utf-8", errors="ignore")
+                            if text.strip():
+                                success = self.import_profile_text("dropped_text", text)
+                                files_imported += 1 if success else 0
+                                files_skipped += 0 if success else 1
+                                continue
+                        except Exception as e:
+                            files_skipped += 1
+                            print(f"Error parsing data URL: {e}")
+                            continue
+
+                    # Regular http(s)
                     dl = self._download_url_text(raw_url)
                     if dl:
                         name_hint, text = dl
