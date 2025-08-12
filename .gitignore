@@ -69,4 +69,5 @@ Thumbs.db
 profiles/
 state.json
 state.json.bak-*
+logs/
 

@@ -4,6 +4,9 @@ import json
 import shutil
 import socket
 import subprocess
+import time
+import logging
+from logging.handlers import RotatingFileHandler
 from functools import partial
 from PyQt6 import QtWidgets, QtCore, QtGui
 from datetime import datetime
@@ -11,7 +14,30 @@ from datetime import datetime
 STATE_FILE = "state.json"
 PROFILE_DIR = "profiles"
 PORT_RANGE = (60000, 65535)
-STATE_VERSION = 2
+STATE_VERSION = 3
+LOG_DIR = "logs"
+
+
+def setup_logging() -> logging.Logger:
+    os.makedirs(LOG_DIR, exist_ok=True)
+    logger = logging.getLogger("wireproxy_gui")
+    if logger.handlers:
+        return logger
+    logger.setLevel(logging.DEBUG)
+    file_handler = RotatingFileHandler(
+        os.path.join(LOG_DIR, "app.log"), maxBytes=1_000_000, backupCount=3, encoding="utf-8"
+    )
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+    return logger
+
+
+LOGGER = setup_logging()
 
 
 class WireProxyManager(QtWidgets.QMainWindow):
@@ -25,6 +51,8 @@ class WireProxyManager(QtWidgets.QMainWindow):
 
         os.makedirs(PROFILE_DIR, exist_ok=True)
         self.state = self.load_state()
+        # Cập nhật mức log theo state
+        self.update_logger_level_from_state()
 
         self.table = QtWidgets.QTableWidget()
         self.table.setColumnCount(3)
@@ -58,6 +86,13 @@ class WireProxyManager(QtWidgets.QMainWindow):
         self.proxy_type_combo.currentIndexChanged.connect(self.on_proxy_type_change)
         limit_layout.addWidget(self.proxy_type_combo)
 
+        # Logging toggle
+        limit_layout.addSpacing(16)
+        self.logging_checkbox = QtWidgets.QCheckBox("Ghi log")
+        self.logging_checkbox.setChecked(bool(self.state.get("logging_enabled", True)))
+        self.logging_checkbox.stateChanged.connect(self.on_logging_change)
+        limit_layout.addWidget(self.logging_checkbox)
+
         limit_layout.addStretch(1)
 
         layout = QtWidgets.QVBoxLayout()
@@ -71,17 +106,48 @@ class WireProxyManager(QtWidgets.QMainWindow):
 
         self.load_profiles()
 
+    def get_wireproxy_log_path(self, profile_name: str) -> str:
+        safe_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in profile_name)
+        return os.path.join(LOG_DIR, f"wireproxy_{safe_name}.log")
+
+    def rotate_profile_log(self, log_path: str, max_bytes: int = 2_000_000, backups: int = 2) -> None:
+        try:
+            if not os.path.exists(log_path):
+                return
+            size = os.path.getsize(log_path)
+            if size <= max_bytes:
+                return
+            # Rotate: *.log -> *.log.1 -> *.log.2 (cap at backups)
+            for idx in range(backups, 0, -1):
+                older = f"{log_path}.{idx}"
+                newer = f"{log_path}" if idx == 1 else f"{log_path}.{idx-1}"
+                if os.path.exists(older):
+                    try:
+                        os.remove(older)
+                    except Exception:
+                        pass
+                if os.path.exists(newer):
+                    try:
+                        os.rename(newer, older)
+                    except Exception:
+                        pass
+            # Ensure new empty file will be created by writer later
+        except Exception:
+            pass
+
     def load_state(self):
-        default_state = {"version": STATE_VERSION, "profiles": [], "port_limit": 10, "wireproxy_path": None, "proxy_type": "socks"}
+        default_state = {"version": STATE_VERSION, "profiles": [], "port_limit": 10, "wireproxy_path": None, "proxy_type": "socks", "logging_enabled": True}
         if os.path.exists(STATE_FILE):
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 try:
                     data = json.load(f)
                     # Versioning + migration
                     if not isinstance(data, dict):
+                        LOGGER.warning("state.json không phải dạng dict. Dùng default_state.")
                         return default_state
                     data.setdefault("version", 0)
                     if int(data.get("version", 0) or 0) < STATE_VERSION:
+                        LOGGER.info("Phát hiện state.json version cũ. Tiến hành migrate…")
                         data = self.migrate_state(data)
                     # Merge mặc định
                     for k, v in default_state.items():
@@ -93,8 +159,10 @@ class WireProxyManager(QtWidgets.QMainWindow):
                         p.setdefault("running", False)
                         p.setdefault("conf_path", None)
                         p.setdefault("last_port", None)
+                    LOGGER.debug(f"State loaded: port_limit={data.get('port_limit')}, proxy_type={data.get('proxy_type')}, profiles={len(data.get('profiles', []))}")
                     return data
                 except:
+                    LOGGER.exception("Lỗi đọc state.json. Dùng default_state.")
                     return default_state
         return default_state
 
@@ -107,6 +175,17 @@ class WireProxyManager(QtWidgets.QMainWindow):
         # Map GUI labels to wireproxy values
         self.state["proxy_type"] = "socks" if selected.startswith("socks") else "http"
         self.save_state()
+
+    def on_logging_change(self, _state: int):
+        enabled = self.logging_checkbox.isChecked()
+        self.state["logging_enabled"] = bool(enabled)
+        self.save_state()
+        self.update_logger_level_from_state()
+
+    def update_logger_level_from_state(self):
+        enabled = bool(self.state.get("logging_enabled", True))
+        logger = logging.getLogger("wireproxy_gui")
+        logger.setLevel(logging.DEBUG if enabled else logging.CRITICAL)
 
     def migrate_state(self, data: dict) -> dict:
         """Nâng cấp state cũ lên schema mới theo STATE_VERSION. Sẽ backup file cũ trước khi ghi."""
@@ -135,6 +214,16 @@ class WireProxyManager(QtWidgets.QMainWindow):
                     pass
                 current = 2
                 continue
+            if current < 3:
+                # v3: thêm logging_enabled (mặc định True)
+                try:
+                    if not isinstance(data, dict):
+                        data = {}
+                    data.setdefault("logging_enabled", True)
+                except Exception:
+                    pass
+                current = 3
+                continue
             # An toàn: nếu không có rule cụ thể, thoát vòng lặp
             break
 
@@ -157,12 +246,14 @@ class WireProxyManager(QtWidgets.QMainWindow):
         # 1) state lưu sẵn
         path = self.state.get("wireproxy_path")
         if path and os.path.exists(path):
+            LOGGER.debug(f"Dùng wireproxy từ state: {path}")
             return path
         # 2) thử dò trong PATH
         guessed = shutil.which("wireproxy") or shutil.which("wireproxy.exe")
         if guessed and os.path.exists(guessed):
             self.state["wireproxy_path"] = guessed
             self.save_state()
+            LOGGER.info(f"Tìm thấy wireproxy trong PATH: {guessed}")
             return guessed
         # 3) hỏi người dùng chọn
         file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -179,6 +270,7 @@ class WireProxyManager(QtWidgets.QMainWindow):
             return None
         self.state["wireproxy_path"] = file_path
         self.save_state()
+        LOGGER.info(f"Người dùng chọn wireproxy: {file_path}")
         return file_path
 
     def choose_wireproxy_path(self):
@@ -211,11 +303,14 @@ class WireProxyManager(QtWidgets.QMainWindow):
         for p in self.state["profiles"]:
             if self.is_process_running(p.get("pid")) and p.get("proxy_port"):
                 ports.append(int(p["proxy_port"]))
+        LOGGER.debug(f"Ports in use (app): {ports}")
         return set(ports)
 
     def is_port_free_os(self, port: int) -> bool:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            return s.connect_ex(("127.0.0.1", int(port))) != 0
+            free = s.connect_ex(("127.0.0.1", int(port))) != 0
+            LOGGER.debug(f"OS port check {port}: {'free' if free else 'busy'}")
+            return free
 
     def iter_available_ports_quick(self):
         """Trả về generator port khả dụng theo giới hạn, chỉ loại trừ các port đã dùng trong app.
@@ -329,6 +424,8 @@ class WireProxyManager(QtWidgets.QMainWindow):
             act_import.triggered.connect(self.import_profile)
             act_cfg = menu.addAction("Cấu hình đường dẫn WireProxy…")
             act_cfg.triggered.connect(self.choose_wireproxy_path)
+            act_logs = menu.addAction("Mở thư mục logs…")
+            act_logs.triggered.connect(self.open_logs_folder)
 
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
@@ -394,6 +491,7 @@ class WireProxyManager(QtWidgets.QMainWindow):
         allowed = set(self.get_allowed_ports())
         if port not in allowed:
             QtWidgets.QMessageBox.warning(self, "Ngoài giới hạn", f"Port {port} không nằm trong giới hạn hiện tại.")
+            LOGGER.warning(f"Yêu cầu ngoài giới hạn: port={port}")
             return
         # Xử lý ghi đè: nếu port đang dùng bởi profile khác do app quản lý → hỏi xác nhận và disconnect
         # 1) Tìm profile khác đang dùng port này (trong app)
@@ -424,15 +522,18 @@ class WireProxyManager(QtWidgets.QMainWindow):
             # Kiểm tra lại: nếu vẫn bận thì không thể ghi đè (do process ngoài app)
             if not self.is_port_free_os(port):
                 QtWidgets.QMessageBox.critical(self, "Port bận", f"Không thể dùng port {port} vì đang bận bởi tiến trình khác.")
+                LOGGER.error(f"Ghi đè thất bại: port {port} bận bởi tiến trình ngoài app")
                 return
         else:
             # Không có profile nào của app dùng; nếu OS báo bận → process ngoài app, chặn
             if not self.is_port_free_os(port):
                 QtWidgets.QMessageBox.warning(self, "Port bận", f"Port {port} đang được sử dụng bởi tiến trình khác.")
+                LOGGER.warning(f"Port {port} bận bởi tiến trình ngoài app")
                 return
             # Và nếu vì lý do nào đó port nằm trong get_ports_in_use (không nên xảy ra) thì chặn dự phòng
             if port in self.get_ports_in_use():
                 QtWidgets.QMessageBox.warning(self, "Port bận", f"Port {port} đang được sử dụng.")
+                LOGGER.warning(f"Port {port} nằm trong danh sách đang dùng (bất thường)")
                 return
         # Đảm bảo có wireproxy
         wireproxy_path = self.ensure_wireproxy_path()
@@ -442,14 +543,41 @@ class WireProxyManager(QtWidgets.QMainWindow):
             temp_conf = os.path.join(PROFILE_DIR, f"{profile['name']}_wireproxy.conf")
             proxy_type = (self.state.get("proxy_type") or "socks").lower()
             self.generate_wireproxy_conf(profile["conf_path"], port, temp_conf, proxy_type)
-            proc = subprocess.Popen([wireproxy_path, "-c", temp_conf])
+            log_path = self.get_wireproxy_log_path(profile['name'])
+            if bool(self.state.get("logging_enabled", True)):
+                # Rotate profile log if too large
+                self.rotate_profile_log(log_path)
+                with open(log_path, "a", encoding="utf-8") as log_f:
+                log_f.write("\n=== Launch wireproxy ===\n")
+                log_f.write(f"cmd: {wireproxy_path} -c {temp_conf}\n")
+                log_f.write(f"proxy_type: {proxy_type}\n")
+            LOGGER.info(f"Starting wireproxy for '{profile['name']}' on 127.0.0.1:{port} ({proxy_type}), log={log_path}")
+            if bool(self.state.get("logging_enabled", True)):
+                log_f = open(log_path, "a", encoding="utf-8")
+                try:
+                    proc = subprocess.Popen([wireproxy_path, "-c", temp_conf], stdout=log_f, stderr=subprocess.STDOUT)
+                finally:
+                    try:
+                        log_f.close()
+                    except Exception:
+                        pass
+            else:
+                proc = subprocess.Popen([wireproxy_path, "-c", temp_conf], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+            # Đợi ngắn để phát hiện thoát sớm
+            time.sleep(0.25)
+            if proc.poll() is not None:
+                LOGGER.error(f"wireproxy exited immediately for '{profile['name']}' with code {proc.returncode}")
+                QtWidgets.QMessageBox.critical(self, "WireProxy lỗi", f"WireProxy đã thoát ngay (mã {proc.returncode}). Xem log: {log_path}")
+                return
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Lỗi", f"Không chạy được WireProxy: {e}")
+            LOGGER.exception(f"Không chạy được WireProxy cho '{profile['name']}'")
             return
         profile["proxy_port"] = int(port)
         profile["last_port"] = int(port)
         profile["pid"] = proc.pid
         profile["running"] = True
+        LOGGER.info(f"wireproxy started: pid={proc.pid}, profile='{profile['name']}', port={port}")
 
     def connect_profile(self, profile):
         # Đảm bảo file cấu hình tồn tại, nếu thiếu cho phép liên kết lại hoặc xóa
@@ -470,9 +598,33 @@ class WireProxyManager(QtWidgets.QMainWindow):
         self.generate_wireproxy_conf(profile["conf_path"], port, temp_conf, proxy_type)
 
         try:
-            proc = subprocess.Popen([wireproxy_path, "-c", temp_conf])
+            log_path = self.get_wireproxy_log_path(profile['name'])
+            if bool(self.state.get("logging_enabled", True)):
+                self.rotate_profile_log(log_path)
+                with open(log_path, "a", encoding="utf-8") as log_f:
+                log_f.write("\n=== Launch wireproxy ===\n")
+                log_f.write(f"cmd: {wireproxy_path} -c {temp_conf}\n")
+                log_f.write(f"proxy_type: {proxy_type}\n")
+            LOGGER.info(f"Starting wireproxy for '{profile['name']}' on 127.0.0.1:{port} ({proxy_type}), log={log_path}")
+            if bool(self.state.get("logging_enabled", True)):
+                log_f = open(log_path, "a", encoding="utf-8")
+                try:
+                    proc = subprocess.Popen([wireproxy_path, "-c", temp_conf], stdout=log_f, stderr=subprocess.STDOUT)
+                finally:
+                    try:
+                        log_f.close()
+                    except Exception:
+                        pass
+            else:
+                proc = subprocess.Popen([wireproxy_path, "-c", temp_conf], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+            time.sleep(0.25)
+            if proc.poll() is not None:
+                LOGGER.error(f"wireproxy exited immediately for '{profile['name']}' with code {proc.returncode}")
+                QtWidgets.QMessageBox.critical(self, "WireProxy lỗi", f"WireProxy đã thoát ngay (mã {proc.returncode}). Xem log: {log_path}")
+                return
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Lỗi", f"Không chạy được WireProxy: {e}")
+            LOGGER.exception(f"Không chạy được WireProxy cho '{profile['name']}'")
             return
 
         profile["proxy_port"] = int(port)
@@ -484,9 +636,10 @@ class WireProxyManager(QtWidgets.QMainWindow):
         pid = profile.get("pid")
         if pid and self.is_process_running(pid):
             try:
+                LOGGER.info(f"Killing wireproxy pid={pid} for profile='{profile.get('name')}'")
                 os.kill(pid, 9)  # force kill
             except:
-                pass
+                LOGGER.exception(f"Lỗi khi kill pid={pid}")
         # Lưu last_port trước khi xóa proxy_port
         if profile.get("proxy_port"):
             profile["last_port"] = int(profile["proxy_port"])
@@ -502,6 +655,12 @@ class WireProxyManager(QtWidgets.QMainWindow):
             # wireproxy chấp nhận 'socks' hoặc 'http'
             pt = "http" if str(proxy_type).lower() == "http" else "socks"
             f.write(f"ProxyType = {pt}\n")
+        try:
+            with open(output_conf, "r", encoding="utf-8") as rf:
+                content_preview = rf.read()
+            LOGGER.debug(f"Generated wireproxy conf for port={port}, type={proxy_type}:\n{content_preview}")
+        except Exception:
+            pass
 
     def dragEnterEvent(self, event):
         """Xử lý khi file được kéo vào cửa sổ"""
@@ -717,6 +876,18 @@ class WireProxyManager(QtWidgets.QMainWindow):
             self.refresh_table()
             return False
         return False
+
+    def open_logs_folder(self):
+        try:
+            os.makedirs(LOG_DIR, exist_ok=True)
+            if sys.platform.startswith("win"):
+                os.startfile(LOG_DIR)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", LOG_DIR])
+            else:
+                subprocess.Popen(["xdg-open", LOG_DIR])
+        except Exception:
+            QtWidgets.QMessageBox.warning(self, "Lỗi", f"Không mở được thư mục logs: {LOG_DIR}")
 
 
 class EditProfileDialog(QtWidgets.QDialog):
