@@ -366,9 +366,45 @@ class WireProxyManager(QtWidgets.QMainWindow):
         if port not in allowed:
             QtWidgets.QMessageBox.warning(self, "Ngoài giới hạn", f"Port {port} không nằm trong giới hạn hiện tại.")
             return
-        if not self.is_port_free_os(port) or port in self.get_ports_in_use():
-            QtWidgets.QMessageBox.warning(self, "Port bận", f"Port {port} đang được sử dụng.")
-            return
+        # Xử lý ghi đè: nếu port đang dùng bởi profile khác do app quản lý → hỏi xác nhận và disconnect
+        # 1) Tìm profile khác đang dùng port này (trong app)
+        other_profile_using_port = None
+        for p in self.state["profiles"]:
+            if p is profile:
+                continue
+            try:
+                if int(p.get("proxy_port") or 0) == int(port) and self.is_process_running(p.get("pid")):
+                    other_profile_using_port = p
+                    break
+            except Exception:
+                pass
+        # 2) Nếu có profile khác đang dùng → hỏi xác nhận ghi đè
+        if other_profile_using_port is not None:
+            reply = QtWidgets.QMessageBox.question(
+                self,
+                "Ghi đè port",
+                f"Port {port} đang được sử dụng bởi profile '{other_profile_using_port['name']}'.\n"
+                "Bạn có muốn ngắt kết nối profile đó và dùng port này không?",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.No,
+            )
+            if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+                return
+            # Ngắt profile cũ
+            self.disconnect_profile(other_profile_using_port)
+            # Kiểm tra lại: nếu vẫn bận thì không thể ghi đè (do process ngoài app)
+            if not self.is_port_free_os(port):
+                QtWidgets.QMessageBox.critical(self, "Port bận", f"Không thể dùng port {port} vì đang bận bởi tiến trình khác.")
+                return
+        else:
+            # Không có profile nào của app dùng; nếu OS báo bận → process ngoài app, chặn
+            if not self.is_port_free_os(port):
+                QtWidgets.QMessageBox.warning(self, "Port bận", f"Port {port} đang được sử dụng bởi tiến trình khác.")
+                return
+            # Và nếu vì lý do nào đó port nằm trong get_ports_in_use (không nên xảy ra) thì chặn dự phòng
+            if port in self.get_ports_in_use():
+                QtWidgets.QMessageBox.warning(self, "Port bận", f"Port {port} đang được sử dụng.")
+                return
         # Đảm bảo có wireproxy
         wireproxy_path = self.ensure_wireproxy_path()
         if not wireproxy_path:
