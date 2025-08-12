@@ -12,6 +12,9 @@ WireProxy GUI Manager lets you import, manage, connect, and disconnect WireGuard
 - **PyQt6**
 - **WireProxy binary** (if not found in PATH, the app lets you choose the executable)
 - **Windows PowerShell** (tested)
+ - Optional (for QR import):
+   - `opencv-python`, or
+   - `Pillow` + `pyzbar`
 
 ## Setup
 
@@ -33,6 +36,10 @@ python -m venv venv
 
 ```powershell
 pip install PyQt6
+# Optional: enable QR-code import capability (choose one)
+pip install opencv-python
+# or
+pip install pillow pyzbar
 ```
 
 ### 4) Install WireProxy
@@ -56,14 +63,23 @@ python app.py
 
 ### 2) Import WireGuard profile
 
-Two ways:
+Three ways:
 
 #### Method A: Drag & Drop
 1. Drag a `.conf` from Explorer
 2. Drop into the app window
 3. The app imports it and shows a notification
 
-#### Method B: Import button
+#### Method B: Drag & Drop QR image (WireGuard config)
+- Drop a QR image (`.png`, `.jpg`, `.jpeg`, `.bmp`, `.webp`). The app tries to decode the QR and:
+  - If it contains a URL, download the config.
+  - Otherwise, treat the decoded text as a WireGuard config and import.
+- Requires optional dependencies (see above).
+
+#### Method C: Drag & Drop URL
+- Drop an `http/https` URL that points to a WireGuard config. The app downloads and imports it.
+
+#### Method D: Import button
 1. Click the “Drag and drop a .conf here or click to choose” button
 2. Pick a `.conf` in the dialog
 3. The file will be copied into the `profiles/` folder
@@ -86,6 +102,12 @@ The table shows:
 - Choose “Proxy type” at the top (SOCKS5 or HTTP).
 - Stored in `state.json` and used when generating WireProxy config.
 - Default: SOCKS5.
+
+### 7) Logging
+
+- Toggle “Logging” on the top row to enable/disable logs.
+- App logs: `logs/app.log` (rotating).
+- Per-profile logs: `logs/wireproxy_<name>.log` (rotating, created when connecting).
 
 ### 6) Active ports limit
 
@@ -127,6 +149,8 @@ wireproxy-gui/
 ### ✅ Done
 - [x] Import WireGuard profiles (.conf)
 - [x] Drag & Drop support
+- [x] Drag & Drop QR image (decode + import)
+- [x] Drag & Drop URL (download + import)
 - [x] Persist profile states (JSON)
 - [x] Auto-pick free port
 - [x] Connect/Disconnect
@@ -139,6 +163,7 @@ wireproxy-gui/
 - [x] Delete/Edit profile (context menu)
 - [x] Quick port picking within limit (context menu)
 - [x] Limit active ports (UI)
+ - [x] Logging toggle; rotating app and per-profile logs
 
 ### 🔄 Roadmap
 - [ ] Export profile

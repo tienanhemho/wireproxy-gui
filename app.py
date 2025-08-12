@@ -6,6 +6,8 @@ import socket
 import subprocess
 import time
 import logging
+import urllib.request
+import urllib.parse
 from logging.handlers import RotatingFileHandler
 from functools import partial
 from PyQt6 import QtWidgets, QtCore, QtGui
@@ -17,6 +19,21 @@ PORT_RANGE = (60000, 65535)
 STATE_VERSION = 3
 LOG_DIR = "logs"
 TEMP_WIREPROXY_SUFFIX = "_wireproxy.conf"
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".webp")
+
+# Optional QR decoders
+try:
+    import cv2  # type: ignore
+    _HAVE_CV2 = True
+except Exception:
+    _HAVE_CV2 = False
+
+try:
+    from PIL import Image  # type: ignore
+    from pyzbar.pyzbar import decode as pyzbar_decode  # type: ignore
+    _HAVE_PYZBAR = True
+except Exception:
+    _HAVE_PYZBAR = False
 
 
 def setup_logging() -> logging.Logger:
@@ -109,6 +126,32 @@ class WireProxyManager(QtWidgets.QMainWindow):
         self.cleanup_temp_wireproxy_confs()
         self.load_profiles()
 
+    # ==== App lifecycle ====
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        try:
+            # Terminate any running wireproxy processes we started
+            for profile in list(self.state.get("profiles", [])):
+                pid = profile.get("pid")
+                if pid and self.is_process_running(pid):
+                    try:
+                        LOGGER.info(f"Shutting down wireproxy pid={pid} for profile='{profile.get('name')}' on app exit")
+                        self._terminate_process(pid)
+                    except Exception:
+                        LOGGER.exception(f"Failed to terminate pid={pid} during shutdown")
+                # Clear runtime fields
+                if profile.get("proxy_port"):
+                    profile["last_port"] = int(profile["proxy_port"])  # remember last
+                profile["pid"] = None
+                profile["proxy_port"] = None
+                profile["running"] = False
+            # Save state and clean temp files
+            self.save_state()
+            self.cleanup_temp_wireproxy_confs()
+        except Exception:
+            # Do not block closing due to cleanup errors
+            LOGGER.exception("Error during app shutdown cleanup")
+        event.accept()
+
     def get_wireproxy_log_path(self, profile_name: str) -> str:
         safe_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in profile_name)
         return os.path.join(LOG_DIR, f"wireproxy_{safe_name}.log")
@@ -148,6 +191,113 @@ class WireProxyManager(QtWidgets.QMainWindow):
                         pass
         except Exception:
             pass
+
+    # ==== Import helpers (QR / URL / raw text) ====
+    def _is_http_url(self, s: str) -> bool:
+        try:
+            p = urllib.parse.urlparse(s)
+            return p.scheme in ("http", "https") and bool(p.netloc)
+        except Exception:
+            return False
+
+    def import_profile_text(self, name_hint: str, conf_text: str) -> bool:
+        """Create a new profile from raw config text. Returns True on success."""
+        if not conf_text or "[Interface]" not in conf_text:
+            QtWidgets.QMessageBox.warning(self, "Invalid config", "Text does not look like a WireGuard config.")
+            return False
+        safe_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in name_hint.strip() or "imported")
+        if safe_name.endswith("_wireproxy"):
+            safe_name = safe_name.rstrip("_") + "_wg"
+        # ensure uniqueness
+        base = safe_name or "imported"
+        candidate = base
+        idx = 1
+        existing_names = {p["name"] for p in self.state.get("profiles", [])}
+        while candidate in existing_names or os.path.exists(os.path.join(PROFILE_DIR, f"{candidate}.conf")):
+            idx += 1
+            candidate = f"{base}_{idx}"
+        try:
+            dest = os.path.join(PROFILE_DIR, f"{candidate}.conf")
+            with open(dest, "w", encoding="utf-8") as f:
+                f.write(conf_text)
+            self.state.setdefault("profiles", []).append({
+                "name": candidate,
+                "conf_path": dest,
+                "proxy_port": None,
+                "pid": None,
+                "running": False,
+                "last_port": None,
+            })
+            self.save_state()
+            return True
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Error", f"Failed to create profile: {e}")
+            return False
+
+    def _decode_qr_image_to_text(self, image_path: str) -> str | None:
+        """Try to decode a QR code image file to text using OpenCV or pyzbar. Returns None if fails."""
+        # Try OpenCV
+        if _HAVE_CV2:
+            try:
+                img = cv2.imread(image_path)
+                if img is not None:
+                    detector = cv2.QRCodeDetector()
+                    data, points, _ = detector.detectAndDecode(img)
+                    if isinstance(data, str) and data.strip():
+                        return data.strip()
+            except Exception:
+                pass
+        # Try pyzbar
+        if _HAVE_PYZBAR:
+            try:
+                with Image.open(image_path) as im:
+                    results = pyzbar_decode(im)
+                    for r in results:
+                        data = r.data.decode("utf-8", errors="ignore").strip()
+                        if data:
+                            return data
+            except Exception:
+                pass
+        return None
+
+    def _download_url_text(self, url: str, timeout_sec: int = 20) -> tuple[str, str] | None:
+        """Download text from URL. Returns (name_hint, text) or None on failure."""
+        try:
+            with urllib.request.urlopen(url, timeout=timeout_sec) as resp:
+                raw = resp.read()
+                text = raw.decode("utf-8", errors="ignore")
+                if not text.strip():
+                    return None
+                # Derive name from URL path
+                path = urllib.parse.urlparse(url).path
+                name_hint = os.path.splitext(os.path.basename(path) or "downloaded")[0]
+                return (name_hint or "downloaded", text)
+        except Exception as e:
+            LOGGER.exception(f"Failed to download URL {url}: {e}")
+            QtWidgets.QMessageBox.critical(self, "Error", f"Failed to download: {url}\n{e}")
+            return None
+
+    def _mime_contains_acceptable_target(self, mime: QtCore.QMimeData) -> bool:
+        try:
+            # URLs: local conf/images or http(s) links
+            if mime.hasUrls():
+                for url in mime.urls():
+                    lp = url.toLocalFile()
+                    if lp:
+                        ext = os.path.splitext(lp)[1].lower()
+                        if lp.lower().endswith('.conf') or ext in IMAGE_EXTENSIONS:
+                            return True
+                    s = url.toString()
+                    if s and self._is_http_url(s):
+                        return True
+            # Some browsers provide only text
+            if mime.hasText():
+                t = mime.text().strip()
+                if self._is_http_url(t):
+                    return True
+        except Exception:
+            pass
+        return False
 
     def load_state(self):
         default_state = {"version": STATE_VERSION, "profiles": [], "port_limit": 10, "wireproxy_path": None, "proxy_type": "socks", "logging_enabled": True}
@@ -343,6 +493,18 @@ class WireProxyManager(QtWidgets.QMainWindow):
                 break
         return ports
 
+    def get_ports_for_menu(self, max_items: int = 50):
+        """Return a quick list of (port, used_by_app) within the allowed limit, up to max_items.
+        Does NOT scan the OS; only marks ports used by app-managed profiles.
+        """
+        ports: list[tuple[int, bool]] = []
+        used = self.get_ports_in_use()
+        for p in self.get_allowed_ports():
+            ports.append((int(p), int(p) in used))
+            if len(ports) >= max_items:
+                break
+        return ports
+
     def find_free_port(self):
         # Nếu có giới hạn và đã dùng đủ, trả None ngay để tránh quét
         limit = int(self.state.get("port_limit", 0))
@@ -444,18 +606,19 @@ class WireProxyManager(QtWidgets.QMainWindow):
                     act_connect = menu.addAction("Connect")
                     act_connect.triggered.connect(partial(self.toggle_connection, row))
 
-                    # Nâng cao: chọn port trong giới hạn còn trống (nhanh, không quét OS)
-                    advanced = menu.addMenu("Connect (chọn port)")
-                    quick_ports = self.get_available_ports_for_menu(max_items=50)
+                    # Advanced: pick port (show used ones too)
+                    advanced = menu.addMenu("Connect (pick port)")
+                    quick_ports = self.get_ports_for_menu(max_items=50)
                     if not quick_ports:
-                        disabled = advanced.addAction("Không còn port trống trong giới hạn")
+                        disabled = advanced.addAction("No ports within current limit")
                         disabled.setEnabled(False)
                     else:
-                        for p in quick_ports:
-                            action = advanced.addAction(f"127.0.0.1:{p}")
+                        for p, is_used in quick_ports:
+                            label = f"127.0.0.1:{p}" + ("  (using)" if is_used else "")
+                            action = advanced.addAction(label)
                             action.triggered.connect(partial(self.connect_profile_with_port_row, row, int(p)))
                         if len(quick_ports) >= 50:
-                            more = advanced.addAction("… còn nữa, nhập port cụ thể…")
+                            more = advanced.addAction("… more, enter port …")
                             more.triggered.connect(partial(self.prompt_and_connect_port_row, row))
 
                 menu.addSeparator()
@@ -686,7 +849,7 @@ class WireProxyManager(QtWidgets.QMainWindow):
             time.sleep(0.25)
             if proc.poll() is not None:
                 LOGGER.error(f"wireproxy exited immediately for '{profile['name']}' with code {proc.returncode}")
-            QtWidgets.QMessageBox.critical(self, "WireProxy error", f"WireProxy exited immediately (code {proc.returncode}). See log: {log_path}")
+                QtWidgets.QMessageBox.critical(self, "WireProxy error", f"WireProxy exited immediately (code {proc.returncode}). See log: {log_path}")
                 return
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Error", f"Failed to start WireProxy: {e}")
@@ -729,53 +892,84 @@ class WireProxyManager(QtWidgets.QMainWindow):
 
     def dragEnterEvent(self, event):
         """Handle when files are dragged into the window"""
-        if event.mimeData().hasUrls():
-            # Check for .conf files
-            for url in event.mimeData().urls():
-                if url.toLocalFile().endswith('.conf'):
-                    event.acceptProposedAction()
-                    return
+        mime = event.mimeData()
+        # Accept .conf, images, and http(s) URLs
+        if self._mime_contains_acceptable_target(mime):
+            event.acceptProposedAction()
+            return
         event.ignore()
 
     def dragMoveEvent(self, event):
         """Handle when dragged files move within the window"""
-        if event.mimeData().hasUrls():
-            for url in event.mimeData().urls():
-                if url.toLocalFile().endswith('.conf'):
-                    event.acceptProposedAction()
-                    return
-        event.ignore()
+        if self._mime_contains_acceptable_target(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
 
     def dropEvent(self, event):
         """Handle when files are dropped into the window"""
         if event.mimeData().hasUrls():
             files_imported = 0
             files_skipped = 0
-            
+
             for url in event.mimeData().urls():
-                file_path = url.toLocalFile()
-                if file_path.endswith('.conf'):
+                # 1) Local files (conf or image)
+                local_path = url.toLocalFile()
+                if local_path:
                     try:
-                        success = self.import_profile_file(file_path)
-                        if success:
-                            files_imported += 1
-                        else:
-                            files_skipped += 1
+                        lp = local_path
+                        if lp.lower().endswith('.conf') and os.path.exists(lp):
+                            success = self.import_profile_file(lp)
+                            files_imported += 1 if success else 0
+                            files_skipped += 0 if success else 1
+                            continue
+                        # QR image
+                        if os.path.splitext(lp)[1].lower() in IMAGE_EXTENSIONS and os.path.exists(lp):
+                            data_text = self._decode_qr_image_to_text(lp)
+                            if data_text:
+                                # If QR encodes a URL, try to download
+                                if self._is_http_url(data_text):
+                                    dl = self._download_url_text(data_text)
+                                    if dl:
+                                        name_hint, text = dl
+                                        success = self.import_profile_text(name_hint, text)
+                                        files_imported += 1 if success else 0
+                                        files_skipped += 0 if success else 1
+                                        continue
+                                # Otherwise treat as raw config text
+                                success = self.import_profile_text(os.path.splitext(os.path.basename(lp))[0], data_text)
+                                files_imported += 1 if success else 0
+                                files_skipped += 0 if success else 1
+                                continue
                     except Exception as e:
                         files_skipped += 1
-                        print(f"Import error for file {file_path}: {e}")
-            
+                        print(f"Import error for local {local_path}: {e}")
+                        continue
+
+                # 2) URL drops (http/https)
+                try:
+                    raw_url = url.toString()
+                except Exception:
+                    raw_url = ""
+                if raw_url and self._is_http_url(raw_url):
+                    dl = self._download_url_text(raw_url)
+                    if dl:
+                        name_hint, text = dl
+                        success = self.import_profile_text(name_hint, text)
+                        files_imported += 1 if success else 0
+                        files_skipped += 0 if success else 1
+                        continue
+
             # Show result notification
             if files_imported > 0:
                 msg = f"Imported {files_imported} profile(s) successfully"
                 if files_skipped > 0:
-                    msg += f" ({files_skipped} file(s) skipped due to duplicate or error)"
+                    msg += f" ({files_skipped} item(s) skipped due to duplicate or error)"
                 QtWidgets.QMessageBox.information(self, "Import succeeded", msg)
                 self.refresh_table()
             elif files_skipped > 0:
-                QtWidgets.QMessageBox.warning(self, "Import failed", 
-                                            f"{files_skipped} file(s) could not be imported (duplicate or error)")
-            
+                QtWidgets.QMessageBox.warning(self, "Import failed", f"{files_skipped} item(s) could not be imported (duplicate or error)")
+
             event.acceptProposedAction()
 
     def import_profile_file(self, file_path):
