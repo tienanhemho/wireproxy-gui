@@ -85,7 +85,13 @@ Sau khi import, bạn sẽ thấy profile trong bảng với các cột:
 - Port sẽ được tự động chọn trong khoảng 60000-65535 hoặc bạn có thể
   click phải vào hàng → "Connect (chọn port)" để chọn nhanh trong giới hạn
 
-### 5. Giới hạn số port đang hoạt động
+### 5. Chọn loại proxy (SOCKS5/HTTP)
+
+- Ở thanh cấu hình phía trên, chọn mục "Loại proxy" giữa `SOCKS5` và `HTTP`.
+- Lựa chọn này sẽ được lưu vào `state.json` và áp dụng khi khởi chạy WireProxy.
+- Mặc định: SOCKS5.
+
+### 6. Giới hạn số port đang hoạt động
 
 - Ô "Giới hạn số port đang hoạt động" ở đầu cửa sổ cho phép đặt limit.
 - Mặc định: 10. Đặt 0 để không giới hạn.
@@ -124,6 +130,7 @@ wireproxy-gui/
 - Khi mở app, nếu `state.json` cũ hơn schema mới, app sẽ tự động migrate và tạo
   backup `state.json.bak-<timestamp>`.
 - Mặc định `port_limit = 10`. Có thể chỉnh từ UI; app sẽ lưu lại vào `state.json`.
+- Từ phiên bản schema v2, có thêm `proxy_type` (`"socks"` hoặc `"http"`).
 - Dùng `state.example.json` làm mẫu khi cần reset hoặc chia sẻ cấu hình mặc định.
 
 ## .gitignore (quan trọng)
@@ -143,6 +150,8 @@ wireproxy-gui/
 - [x] Giao diện PyQt6 thân thiện
 - [x] Kiểm tra trùng lặp profile
 - [x] Thông báo kết quả import
+ - [x] Ghi đè port trong phạm vi app quản lý (xác nhận → ngắt profile cũ → dùng lại port)
+ - [x] Chọn loại proxy (SOCKS5/HTTP) và áp dụng vào cấu hình WireProxy
  - [x] Xóa profile (context menu)
  - [x] Chỉnh sửa profile (context menu)
  - [x] Chọn port nhanh trong giới hạn (context menu)
