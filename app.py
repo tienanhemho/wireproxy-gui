@@ -11,7 +11,7 @@ from datetime import datetime
 STATE_FILE = "state.json"
 PROFILE_DIR = "profiles"
 PORT_RANGE = (60000, 65535)
-STATE_VERSION = 1
+STATE_VERSION = 2
 
 
 class WireProxyManager(QtWidgets.QMainWindow):
@@ -37,14 +37,27 @@ class WireProxyManager(QtWidgets.QMainWindow):
         import_btn = QtWidgets.QPushButton("Kéo thả file .conf vào màn hình hoặc nhấn để chọn")
         import_btn.clicked.connect(self.import_profile)
 
-        # Hàng cấu hình giới hạn port
+        # Hàng cấu hình giới hạn port + loại proxy
         limit_layout = QtWidgets.QHBoxLayout()
+
+        # Port limit
         limit_layout.addWidget(QtWidgets.QLabel("Giới hạn số port đang hoạt động (0 = không giới hạn):"))
         self.port_limit_spin = QtWidgets.QSpinBox()
         self.port_limit_spin.setRange(0, 10000)
         self.port_limit_spin.setValue(int(self.state.get("port_limit", 10)))
         self.port_limit_spin.valueChanged.connect(self.on_port_limit_change)
         limit_layout.addWidget(self.port_limit_spin)
+
+        # Proxy type selector
+        limit_layout.addSpacing(16)
+        limit_layout.addWidget(QtWidgets.QLabel("Loại proxy:"))
+        self.proxy_type_combo = QtWidgets.QComboBox()
+        self.proxy_type_combo.addItems(["SOCKS5", "HTTP"])
+        current_type = (self.state.get("proxy_type") or "socks").lower()
+        self.proxy_type_combo.setCurrentIndex(0 if current_type == "socks" else 1)
+        self.proxy_type_combo.currentIndexChanged.connect(self.on_proxy_type_change)
+        limit_layout.addWidget(self.proxy_type_combo)
+
         limit_layout.addStretch(1)
 
         layout = QtWidgets.QVBoxLayout()
@@ -59,7 +72,7 @@ class WireProxyManager(QtWidgets.QMainWindow):
         self.load_profiles()
 
     def load_state(self):
-        default_state = {"version": STATE_VERSION, "profiles": [], "port_limit": 10, "wireproxy_path": None}
+        default_state = {"version": STATE_VERSION, "profiles": [], "port_limit": 10, "wireproxy_path": None, "proxy_type": "socks"}
         if os.path.exists(STATE_FILE):
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 try:
@@ -89,6 +102,12 @@ class WireProxyManager(QtWidgets.QMainWindow):
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(self.state, f, ensure_ascii=False, indent=2)
 
+    def on_proxy_type_change(self, _index: int):
+        selected = self.proxy_type_combo.currentText().lower()
+        # Map GUI labels to wireproxy values
+        self.state["proxy_type"] = "socks" if selected.startswith("socks") else "http"
+        self.save_state()
+
     def migrate_state(self, data: dict) -> dict:
         """Nâng cấp state cũ lên schema mới theo STATE_VERSION. Sẽ backup file cũ trước khi ghi."""
         try:
@@ -105,6 +124,16 @@ class WireProxyManager(QtWidgets.QMainWindow):
             if current < 1:
                 # v1: khởi tạo schema cơ bản, không đổi gì thêm
                 current = 1
+                continue
+            if current < 2:
+                # v2: thêm cấu hình loại proxy ở state (mặc định socks)
+                try:
+                    if not isinstance(data, dict):
+                        data = {}
+                    data.setdefault("proxy_type", "socks")
+                except Exception:
+                    pass
+                current = 2
                 continue
             # An toàn: nếu không có rule cụ thể, thoát vòng lặp
             break
@@ -411,7 +440,8 @@ class WireProxyManager(QtWidgets.QMainWindow):
             return
         try:
             temp_conf = os.path.join(PROFILE_DIR, f"{profile['name']}_wireproxy.conf")
-            self.generate_wireproxy_conf(profile["conf_path"], port, temp_conf)
+            proxy_type = (self.state.get("proxy_type") or "socks").lower()
+            self.generate_wireproxy_conf(profile["conf_path"], port, temp_conf, proxy_type)
             proc = subprocess.Popen([wireproxy_path, "-c", temp_conf])
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Lỗi", f"Không chạy được WireProxy: {e}")
@@ -436,7 +466,8 @@ class WireProxyManager(QtWidgets.QMainWindow):
             return
 
         temp_conf = os.path.join(PROFILE_DIR, f"{profile['name']}_wireproxy.conf")
-        self.generate_wireproxy_conf(profile["conf_path"], port, temp_conf)
+        proxy_type = (self.state.get("proxy_type") or "socks").lower()
+        self.generate_wireproxy_conf(profile["conf_path"], port, temp_conf, proxy_type)
 
         try:
             proc = subprocess.Popen([wireproxy_path, "-c", temp_conf])
@@ -463,12 +494,14 @@ class WireProxyManager(QtWidgets.QMainWindow):
         profile["proxy_port"] = None
         profile["running"] = False
 
-    def generate_wireproxy_conf(self, wg_conf, port, output_conf):
+    def generate_wireproxy_conf(self, wg_conf, port, output_conf, proxy_type: str = "socks"):
         with open(output_conf, "w", encoding="utf-8") as f:
             f.write(f"[WireGuard]\nConfigFile = {wg_conf}\n\n")
             f.write("[Proxy]\n")
             f.write(f"BindAddress = 127.0.0.1:{port}\n")
-            f.write("ProxyType = socks\n")
+            # wireproxy chấp nhận 'socks' hoặc 'http'
+            pt = "http" if str(proxy_type).lower() == "http" else "socks"
+            f.write(f"ProxyType = {pt}\n")
 
     def dragEnterEvent(self, event):
         """Xử lý khi file được kéo vào cửa sổ"""
