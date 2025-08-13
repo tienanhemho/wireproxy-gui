@@ -25,6 +25,13 @@ LOGGER = logging.getLogger("wireproxy_gui")
 PROFILE_DIR = "profiles"
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".webp")
 
+def is_http_url(s: str) -> bool:
+    try:
+        p = urllib.parse.urlparse(s)
+        return p.scheme in ("http", "https") and bool(p.netloc)
+    except Exception:
+        return False
+
 class ProfileService:
     def __init__(self, state_service):
         self.state_service = state_service
@@ -231,21 +238,19 @@ class ProfileService:
             except Exception: pass
         return None
 
-    def download_from_url(self, url: str, timeout: int = 15) -> tuple[str, str] | None:
-        """Returns (name_hint, content_text) or None."""
+    def download_text_from_url(self, url: str, timeout: int = 15) -> tuple[str, str] | None:
+        """Downloads text content from a URL. Returns (name_hint, content_text)."""
         try:
             with urllib.request.urlopen(url, timeout=timeout) as resp:
+                # Ensure it's not an image, treat as text config
+                if resp.headers.get("Content-Type", "").lower().startswith("image/"):
+                    LOGGER.warning(f"URL pointed to an image, but was expected to be a config file: {url}")
+                    return None
+                
                 raw_data = resp.read()
                 path = urllib.parse.urlparse(url).path
                 name_hint = os.path.splitext(os.path.basename(path) or "downloaded")[0]
-                
-                # If it's an image, try to decode QR
-                if resp.headers.get("Content-Type", "").lower().startswith("image/"):
-                    text = self.decode_qr_from_bytes(raw_data)
-                    return (name_hint, text) if text else None
-                
-                # Otherwise, treat as text
                 return (name_hint, raw_data.decode("utf-8", "ignore"))
         except Exception:
-            LOGGER.exception(f"Failed to download from URL: {url}")
+            LOGGER.exception(f"Failed to download text from URL: {url}")
             return None

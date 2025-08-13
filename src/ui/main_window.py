@@ -6,7 +6,8 @@ from functools import partial
 from PyQt6 import QtWidgets, QtCore, QtGui
 
 from src.ui.edit_dialog import EditProfileDialog
-from src.services.profile_service import IMAGE_EXTENSIONS
+from src.services.profile_service import IMAGE_EXTENSIONS, is_http_url
+import base64
 
 LOGGER = logging.getLogger("wireproxy_gui")
 PROFILE_DIR = "profiles"
@@ -135,8 +136,13 @@ class MainWindow(QtWidgets.QMainWindow):
             if profile.get("running"):
                 menu.addAction("Disconnect").triggered.connect(lambda: self.toggle_connection(row))
             else:
-                menu.addAction("Connect").triggered.connect(lambda: self.toggle_connection(row))
-            
+                act_connect = menu.addAction("Connect (auto-pick port)")
+                act_connect.triggered.connect(lambda: self.toggle_connection(row))
+
+                # Add "Connect (pick port)" submenu
+                pick_port_menu = menu.addMenu("Connect (pick port)")
+                self.populate_pick_port_menu(pick_port_menu, row)
+
             menu.addSeparator()
             menu.addAction("Edit").triggered.connect(lambda: self.edit_profile(row))
             menu.addAction("Delete").triggered.connect(lambda: self.delete_profile(row))
@@ -160,6 +166,79 @@ class MainWindow(QtWidgets.QMainWindow):
             menu.addAction("Open Logs Folder...").triggered.connect(self.open_logs_folder)
 
         menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def populate_pick_port_menu(self, menu, row):
+        ports_with_status = self.get_ports_for_menu()
+        if not ports_with_status:
+            menu.addAction("No ports available in limit").setEnabled(False)
+            return
+
+        for port, is_used in ports_with_status:
+            label = f"Port {port}" + (" (in use)" if is_used else "")
+            action = menu.addAction(label)
+            action.triggered.connect(partial(self.connect_with_specific_port, row, port))
+        
+        if len(ports_with_status) >= 50: # Add option to enter manually if list is long
+            menu.addSeparator()
+            menu.addAction("Enter port...").triggered.connect(lambda: self.prompt_and_connect(row))
+
+    def get_ports_for_menu(self, max_ports=50):
+        """Gets a list of (port, is_used) tuples for the context menu."""
+        state = self.state_service.get_state()
+        used_ports = {
+            p["proxy_port"] for p in state["profiles"]
+            if p.get("proxy_port") and self.wireproxy_service.is_process_running(p.get("pid"))
+        }
+        
+        limit = int(state.get("port_limit", 0))
+        allowed_ports = range(PORT_RANGE[0], PORT_RANGE[0] + limit) if limit > 0 else PORT_RANGE
+        
+        ports_list = []
+        for port in allowed_ports:
+            if len(ports_list) >= max_ports:
+                break
+            ports_list.append((port, port in used_ports))
+        return ports_list
+
+    def prompt_and_connect(self, row):
+        port_str, ok = QtWidgets.QInputDialog.getInt(self, "Choose Port", "Enter a port number:", PORT_RANGE[0], PORT_RANGE[0], PORT_RANGE[1], 1)
+        if ok:
+            self.connect_with_specific_port(row, port_str)
+
+    def connect_with_specific_port(self, row, port):
+        profile_to_connect = self.state_service.get_state()["profiles"][row]
+        state = self.state_service.get_state()
+
+        # Check if another profile is using this port
+        other_profile = next((p for p in state["profiles"] if p.get("proxy_port") == port and p["name"] != profile_to_connect["name"]), None)
+        
+        if other_profile and self.wireproxy_service.is_process_running(other_profile.get("pid")):
+            reply = QtWidgets.QMessageBox.question(self, "Port In Use",
+                f"Port {port} is used by '{other_profile['name']}'.\nDisconnect it and connect '{profile_to_connect['name']}'?",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No)
+            if reply == QtWidgets.QMessageBox.StandardButton.No:
+                return
+            self.wireproxy_service.stop_process(other_profile)
+            self.refresh_table()
+            # Give a moment for the port to be released
+            QtCore.QTimer.singleShot(500, lambda: self._finish_connecting_specific_port(profile_to_connect, port))
+        else:
+            self._finish_connecting_specific_port(profile_to_connect, port)
+
+    def _finish_connecting_specific_port(self, profile, port):
+        if not self.is_port_free_os(port):
+            QtWidgets.QMessageBox.critical(self, "Error", f"Port {port} is still in use by an external process.")
+            return
+
+        pid = self.wireproxy_service.start_process(profile, port)
+        if pid:
+            profile["pid"] = pid
+            profile["proxy_port"] = port
+            profile["running"] = True
+            self.state_service.save_state()
+        else:
+            QtWidgets.QMessageBox.critical(self, "Error", "Failed to start WireProxy. Check logs for details.")
+        self.refresh_table()
 
     def auto_connect_all(self):
         if self.auto_connect_service.is_running():
@@ -338,23 +417,55 @@ class MainWindow(QtWidgets.QMainWindow):
 
         imported_count = 0
         for url in mime.urls():
-            path = url.toLocalFile()
-            if path: # Local file drop
-                if os.path.splitext(path)[1].lower() == '.conf':
+            # Case 1: Local file (.conf or image)
+            if url.isLocalFile():
+                path = url.toLocalFile()
+                if path.lower().endswith(".conf"):
                     success, _ = self.profile_service.import_from_file(path)
                     if success: imported_count += 1
                 elif os.path.splitext(path)[1].lower() in IMAGE_EXTENSIONS:
-                    text = self.profile_service.decode_qr_from_path(path)
+                    imported_count += self._handle_qr_import(path)
+                continue
+
+            # Case 2: Remote URL (http/https or data)
+            raw_url = url.toString()
+            if raw_url.startswith("data:"): # Image dragged from browser
+                try:
+                    header, b64data = raw_url.split(",", 1)
+                    data = base64.b64decode(b64data)
+                    text = self.profile_service.decode_qr_from_bytes(data)
                     if text:
-                        success, _ = self.profile_service.import_from_text(os.path.basename(path), text)
-                        if success: imported_count += 1
-            else: # URL drop
-                content = self.profile_service.download_from_url(url.toString())
-                if content:
-                    name_hint, text = content
-                    success, _ = self.profile_service.import_from_text(name_hint, text)
-                    if success: imported_count += 1
-        
+                        if is_http_url(text): # QR points to another URL
+                            imported_count += self._handle_url_import(text)
+                        else: # QR contains config
+                            success, _ = self.profile_service.import_from_text("qr_import", text)
+                            if success: imported_count += 1
+                except Exception as e:
+                    LOGGER.error(f"Failed to process data URL: {e}")
+            elif is_http_url(raw_url): # Regular URL
+                imported_count += self._handle_url_import(raw_url)
+
         if imported_count > 0:
-            QtWidgets.QMessageBox.information(self, "Success", f"Imported {imported_count} profile(s).")
+            QtWidgets.QMessageBox.information(self, "Success", f"Successfully imported {imported_count} profile(s).")
             self.refresh_table()
+
+    def _handle_qr_import(self, file_path: str) -> int:
+        """Helper to process QR code from a file path. Returns 1 on success, 0 on failure."""
+        qr_text = self.profile_service.decode_qr_from_path(file_path)
+        if not qr_text:
+            return 0
+        
+        if is_http_url(qr_text):
+            return self._handle_url_import(qr_text)
+        else:
+            success, _ = self.profile_service.import_from_text(os.path.basename(file_path), qr_text)
+            return 1 if success else 0
+
+    def _handle_url_import(self, url: str) -> int:
+        """Helper to download config from a URL. Returns 1 on success, 0 on failure."""
+        download = self.profile_service.download_text_from_url(url)
+        if download:
+            name_hint, text = download
+            success, _ = self.profile_service.import_from_text(name_hint, text)
+            return 1 if success else 0
+        return 0
