@@ -35,11 +35,7 @@ python -m venv venv
 ### 3) Install dependencies
 
 ```powershell
-pip install PyQt6
-# Optional: enable QR-code import capability (choose one)
-pip install opencv-python
-# or
-pip install pillow pyzbar
+pip install -r requirements.txt
 ```
 
 ### 4) Install WireProxy
