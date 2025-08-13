@@ -62,6 +62,10 @@ LOGGER = setup_logging()
 
 
 class WireProxyManager(QtWidgets.QMainWindow):
+    # host, location, zip
+    location_fetched = QtCore.pyqtSignal(str, str, str)
+    auto_connect_finished = QtCore.pyqtSignal()
+    auto_connect_progress = QtCore.pyqtSignal()
     def __init__(self):
         super().__init__()
         self.setWindowTitle("WireProxy GUI Manager")
@@ -76,9 +80,19 @@ class WireProxyManager(QtWidgets.QMainWindow):
         self.update_logger_level_from_state()
 
         self.table = QtWidgets.QTableWidget()
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["Profile Name", "Proxy Port", "Status"])
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(["Profile Name", "Host", "Location", "ZIP", "Proxy Port", "Status"])
         self.table.horizontalHeader().setStretchLastSection(True)
+        try:
+            # Set sensible default widths
+            self.table.setColumnWidth(0, 150)  # Name
+            self.table.setColumnWidth(1, 150)  # Host
+            self.table.setColumnWidth(2, 150)  # Location
+            self.table.setColumnWidth(3, 80)   # ZIP
+            self.table.setColumnWidth(4, 90)   # Port
+            self.table.setColumnWidth(5, 80)  # Status
+        except Exception:
+            pass
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.on_table_context_menu)
@@ -124,6 +138,15 @@ class WireProxyManager(QtWidgets.QMainWindow):
         container = QtWidgets.QWidget()
         container.setLayout(layout)
         self.setCentralWidget(container)
+
+        # Geo cache for ip-api results: host -> {location, zip}
+        self.geo_cache: dict[str, dict[str, str]] = {}
+        self.geo_inflight: set[str] = set()
+        self.location_fetched.connect(self._on_location_fetched)
+        self.auto_connect_finished.connect(self.refresh_table)
+        self.auto_connect_progress.connect(self.refresh_table)
+        self._auto_connect_running = False
+        self._auto_reserved_ports: set[int] = set()
 
         # Cleanup old temporary wireproxy files (if any)
         self.cleanup_temp_wireproxy_confs()
@@ -587,19 +610,151 @@ class WireProxyManager(QtWidgets.QMainWindow):
         try:
             self.table.setRowCount(len(self.state["profiles"]))
             for row, profile in enumerate(self.state["profiles"]):
+                # Name
                 self.table.setItem(row, 0, QtWidgets.QTableWidgetItem(profile["name"]))
+                # Host (IP/Domain)
+                host = self.get_profile_host(profile) or "—"
+                self.table.setItem(row, 1, QtWidgets.QTableWidgetItem(host))
+                # Location + ZIP (via ip-api.com)
+                if host != "—":
+                    info = self.geo_cache.get(host)
+                    if info:
+                        location = info.get("location") or "Unknown"
+                        zip_code = info.get("zip") or "—"
+                    else:
+                        location = "Loading…"
+                        zip_code = "Loading…"
+                        self._start_location_fetch(host)
+                else:
+                    location = "—"
+                    zip_code = "—"
+                self.table.setItem(row, 2, QtWidgets.QTableWidgetItem(location))
+                self.table.setItem(row, 3, QtWidgets.QTableWidgetItem(zip_code))
+                # Proxy port
                 self.table.setItem(
                     row,
-                    1,
-                    QtWidgets.QTableWidgetItem(str(profile["proxy_port"]) if profile["proxy_port"] else "—"),
+                    4,
+                    QtWidgets.QTableWidgetItem(str(profile["proxy_port"]) if profile.get("proxy_port") else "—"),
                 )
+                # Status
                 status_text = "Đang chạy" if self.is_process_running(profile.get("pid")) else "Chưa chạy"
-            self.table.setItem(row, 2, QtWidgets.QTableWidgetItem(status_text))
+                self.table.setItem(row, 5, QtWidgets.QTableWidgetItem(status_text))
             self.save_state()
         except KeyboardInterrupt:
             LOGGER.warning("Refresh table interrupted by user")
         except Exception:
             LOGGER.exception("Lỗi khi refresh_table")
+
+    def get_profile_host(self, profile) -> str | None:
+        """Parse the WireGuard .conf to extract Endpoint host (IP/Domain) from [Peer]."""
+        try:
+            conf_path = profile.get("conf_path")
+            if not conf_path or not os.path.exists(conf_path):
+                return None
+            host_cached = profile.get("_host_cache")
+            if host_cached:
+                return host_cached
+            with open(conf_path, "r", encoding="utf-8") as f:
+                in_peer = False
+                for raw in f:
+                    line = raw.strip()
+                    if not line or line.startswith("#") or line.startswith(";"):
+                        continue
+                    if line.startswith("[") and line.endswith("]"):
+                        section = line[1:-1].strip().lower()
+                        in_peer = (section == "peer")
+                        continue
+                    if in_peer and line.lower().startswith("endpoint"):
+                        # Format: Endpoint = host:port  OR Endpoint= [IPv6]:port
+                        try:
+                            _, _, value = line.partition("=")
+                            value = value.strip()
+                            # Remove comments at end of line
+                            for sep in (" #", " ;"):
+                                if sep in value:
+                                    value = value.split(sep, 1)[0].strip()
+                            # IPv6 in brackets
+                            host: str
+                            if value.startswith("["):
+                                end = value.find("]")
+                                if end > 1:
+                                    host = value[1:end]
+                                else:
+                                    host = value
+                            else:
+                                # split last ':' as port separator
+                                if ":" in value:
+                                    host = value.rsplit(":", 1)[0].strip()
+                                else:
+                                    host = value
+                            # Cache on profile to avoid re-reading
+                            profile["_host_cache"] = host
+                            return host
+                        except Exception:
+                            break
+            return None
+        except Exception:
+            return None
+
+    def _start_location_fetch(self, host: str) -> None:
+        try:
+            if not host or host in self.geo_inflight or host in self.geo_cache:
+                return
+            self.geo_inflight.add(host)
+            import threading
+            t = threading.Thread(target=self._location_fetch_worker, args=(host,), daemon=True)
+            t.start()
+        except Exception:
+            pass
+
+    def _location_fetch_worker(self, host: str) -> None:
+        """Background worker to query ip-api.com for host location."""
+        location = "Unknown"
+        zip_code = ""
+        try:
+            # Free plan uses http (no SSL). Query can be IP or domain.
+            fields = "status,country,city,regionName,countryCode,zip"
+            url = f"http://ip-api.com/json/{urllib.parse.quote(host)}?fields={fields}&lang=en"
+            with urllib.request.urlopen(url, timeout=6) as resp:
+                data = resp.read()
+            info = json.loads(data.decode("utf-8", errors="ignore")) if data else {}
+            if isinstance(info, dict) and str(info.get("status")).lower() == "success":
+                city = (info.get("city") or "").strip()
+                region = (info.get("regionName") or "").strip()
+                ccode = (info.get("countryCode") or "").strip()
+                country = (info.get("country") or "").strip()
+                zip_code = (info.get("zip") or "").strip()
+                parts = []
+                if city:
+                    parts.append(city)
+                elif region:
+                    parts.append(region)
+                if ccode:
+                    parts.append(ccode)
+                elif country:
+                    parts.append(country)
+                location = ", ".join([p for p in parts if p]) or (country or "Unknown")
+        except Exception:
+            pass
+        finally:
+            try:
+                self.location_fetched.emit(host, location, zip_code or "")
+            except Exception:
+                pass
+
+    def _on_location_fetched(self, host: str, location: str, zip_code: str) -> None:
+        try:
+            self.geo_inflight.discard(host)
+            self.geo_cache[host] = {"location": location or "Unknown", "zip": zip_code or ""}
+            # Update all rows where host matches
+            row_count = self.table.rowCount()
+            for row in range(row_count):
+                item = self.table.item(row, 1)
+                if item and item.text() == host:
+                    self.table.setItem(row, 2, QtWidgets.QTableWidgetItem(self.geo_cache[host]["location"]))
+                    self.table.setItem(row, 3, QtWidgets.QTableWidgetItem(self.geo_cache[host]["zip"] or "—"))
+        except Exception:
+            pass
 
     def is_process_running(self, pid):
         if not pid:
@@ -670,11 +825,17 @@ class WireProxyManager(QtWidgets.QMainWindow):
 
                 act_delete = menu.addAction("Xóa")
                 act_delete.triggered.connect(partial(self.delete_profile, row))
+                # Auto connect helpers
+                act_from_here = menu.addAction("Auto connect từ hàng này (tối đa theo giới hạn)")
+                act_from_here.triggered.connect(partial(self.auto_connect_from_row, row))
             else:
                 # Không nằm trên hàng nào → menu chung
                 act_auto = menu.addAction("Tự động kết nối theo giới hạn")
                 act_auto.triggered.connect(self.auto_connect_up_to_limit)
+                act_range = menu.addAction("Auto connect: chọn phạm vi…")
+                act_range.triggered.connect(self.auto_connect_range_prompt)
                 menu.addSeparator()
+                # act_range intentionally removed from top-level context menu to reduce redundancy
                 act_import = menu.addAction("Import profile (.conf)")
                 act_import.triggered.connect(self.import_profile)
                 act_cfg = menu.addAction("Cấu hình đường dẫn WireProxy…")
@@ -712,24 +873,16 @@ class WireProxyManager(QtWidgets.QMainWindow):
         self.refresh_table()
 
     def auto_connect_up_to_limit(self):
-        # Connect sequentially until reaching limit.
-        # Do not mass-scan OS ports; only check when connecting each profile.
-        used_before = len(self.get_ports_in_use())
-        limit = int(self.state.get("port_limit", 0))
-        if limit and used_before >= limit:
-            QtWidgets.QMessageBox.information(self, "Hết port", "Đã đạt tối đa số port trong giới hạn.")
+        # Run in background to avoid blocking UI
+        if self._auto_connect_running:
             return
-        for profile in self.state["profiles"]:
-            if limit:
-                used_now = len(self.get_ports_in_use())
-                if used_now >= limit:
-                    break
-            if not self.is_process_running(profile.get("pid")):
-                port = self.pick_port_for_profile(profile)
-                if not port:
-                    break
-                self.connect_profile_with_port(profile, port)
-        self.refresh_table()
+        self._auto_connect_running = True
+        try:
+            import threading
+            t = threading.Thread(target=self._auto_connect_manager, args=(None, None), daemon=True)
+            t.start()
+        except Exception:
+            self._auto_connect_running = False
 
     # ==== Connect/Disconnect ====
     def toggle_connection(self, row):
@@ -745,6 +898,279 @@ class WireProxyManager(QtWidgets.QMainWindow):
         except Exception:
             LOGGER.exception("Error in toggle_connection")
             QtWidgets.QMessageBox.critical(self, "Error", "An error occurred during connect/disconnect. Check logs/app.log for details.")
+
+    def _auto_connect_manager(self, indices: list[int] | None, start_port: int | None) -> None:
+        import threading
+        queue: list[int] = []
+        lock = threading.Lock()
+        try:
+            limit = int(self.state.get("port_limit", 0))
+            # Prepare candidate indices
+            iterable = list(range(len(self.state["profiles"]))) if not indices else list(indices)
+            for idx in iterable:
+                profile = self.state["profiles"][idx]
+                if self.is_process_running(profile.get("pid")):
+                    continue
+                conf_path = profile.get("conf_path")
+                if not conf_path or not os.path.exists(conf_path):
+                    continue
+                queue.append(idx)
+            if not queue:
+                return
+            max_workers = max(1, min(4, len(queue)))
+            # Shared next_port when start_port is provided
+            next_port_ref = {"value": int(start_port) if start_port else None}
+            # Compute allowed end port consistent with get_allowed_ports()
+            if limit and limit > 0:
+                end_port = min(PORT_RANGE[0] + limit - 1, PORT_RANGE[1])
+            else:
+                end_port = PORT_RANGE[1]
+            threads: list[threading.Thread] = []
+            for _ in range(max_workers):
+                t = threading.Thread(
+                    target=self._auto_connect_pool_worker,
+                    args=(queue, lock, limit, next_port_ref, end_port),
+                    daemon=True,
+                )
+                t.start()
+                threads.append(t)
+            for t in threads:
+                t.join()
+        finally:
+            try:
+                self.auto_connect_finished.emit()
+            except Exception:
+                pass
+            self._auto_reserved_ports.clear()
+            self._auto_connect_running = False
+
+    def auto_connect_range_prompt(self) -> None:
+        try:
+            row_count = self.table.rowCount()
+            if row_count <= 0:
+                return
+            # Simple dialog with two spin boxes
+            dlg = QtWidgets.QDialog(self)
+            dlg.setWindowTitle("Chọn phạm vi hàng (1-based)")
+            layout = QtWidgets.QFormLayout(dlg)
+            sp_start = QtWidgets.QSpinBox(dlg)
+            sp_end = QtWidgets.QSpinBox(dlg)
+            sp_start.setRange(1, row_count)
+            sp_end.setRange(1, row_count)
+            sp_start.setValue(1)
+            sp_end.setValue(row_count)
+            layout.addRow("Bắt đầu", sp_start)
+            layout.addRow("Kết thúc", sp_end)
+            buttons = QtWidgets.QDialogButtonBox(
+                QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+            )
+            layout.addWidget(buttons)
+            buttons.accepted.connect(dlg.accept)
+            buttons.rejected.connect(dlg.reject)
+            if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+                return
+            start = int(min(sp_start.value(), sp_end.value()))
+            end = int(max(sp_start.value(), sp_end.value()))
+            indices = list(range(start - 1, end))
+            self.auto_connect_with_indices(indices)
+        except Exception:
+            LOGGER.exception("auto_connect_range_prompt failed")
+
+    def auto_connect_with_indices(self, indices: list[int]) -> None:
+        if self._auto_connect_running:
+            return
+        self._auto_connect_running = True
+        try:
+            import threading
+            t = threading.Thread(target=self._auto_connect_manager, args=(indices, None), daemon=True)
+            t.start()
+        except Exception:
+            self._auto_connect_running = False
+
+    def auto_connect_from_row(self, row: int) -> None:
+        try:
+            total = len(self.state.get("profiles", []))
+            if total == 0:
+                return
+            # Build indices from 'row' forward to the end; pool/limit will cap actual count
+            indices: list[int] = list(range(row, total))
+            # Respect starting port = beginning of allowed range
+            start_port = PORT_RANGE[0]
+            if int(self.state.get("port_limit", 0)):
+                start_port = PORT_RANGE[0]
+            import threading
+            if self._auto_connect_running:
+                return
+            self._auto_connect_running = True
+            t = threading.Thread(target=self._auto_connect_manager, args=(indices, start_port), daemon=True)
+            t.start()
+        except Exception:
+            LOGGER.exception("auto_connect_from_row failed")
+
+    def _auto_connect_pool_worker(self, queue: list[int], lock, limit: int, next_port_ref: dict, end_port: int) -> None:
+        while True:
+            try:
+                # Take next index
+                with lock:
+                    # Check limit under lock to reduce race
+                    if limit and len(self.get_ports_in_use()) >= limit:
+                        return
+                    if not queue:
+                        return
+                    # FIFO to preserve order so the starting row gets the first port
+                    idx = queue.pop(0)
+                profile = self.state["profiles"][idx]
+                # Check again
+                if self.is_process_running(profile.get("pid")):
+                    continue
+                conf_path = profile.get("conf_path")
+                if not conf_path or not os.path.exists(conf_path):
+                    continue
+                # Pick and reserve a port
+                port = None
+                # Strategy 1: sequential from provided start_port
+                if next_port_ref.get("value") is not None:
+                    while True:
+                        with lock:
+                            if limit and len(self.get_ports_in_use()) >= limit:
+                                return
+                            candidate = int(next_port_ref["value"])
+                            if candidate > int(end_port):
+                                return
+                            # Advance pointer for next consumer
+                            next_port_ref["value"] = candidate + 1
+                        # Check availability outside lock
+                        if candidate in self._auto_reserved_ports:
+                            continue
+                        if candidate in self.get_ports_in_use():
+                            continue
+                        if not self.is_port_free_os(candidate):
+                            continue
+                        with lock:
+                            if candidate in self._auto_reserved_ports:
+                                continue
+                            self._auto_reserved_ports.add(candidate)
+                            port = candidate
+                            break
+                else:
+                    port = self.pick_port_for_profile(profile)
+                    if not port:
+                        # No more ports available within limit
+                        return
+                    with lock:
+                        if limit and len(self.get_ports_in_use()) >= limit:
+                            return
+                        if int(port) in self._auto_reserved_ports:
+                            # try next later by re-queuing
+                            queue.insert(0, idx)
+                            continue
+                        self._auto_reserved_ports.add(int(port))
+                ok = self._connect_profile_with_port_silent(profile, int(port))
+                # Release reservation
+                with lock:
+                    self._auto_reserved_ports.discard(int(port))
+                # Notify UI progress regardless of success
+                try:
+                    self.auto_connect_progress.emit()
+                except Exception:
+                    pass
+                # Continue to next item
+                continue
+            except Exception:
+                LOGGER.exception("auto_connect pool worker failed")
+                try:
+                    self.auto_connect_progress.emit()
+                except Exception:
+                    pass
+                continue
+
+    def _connect_profile_with_port_silent(self, profile, port: int) -> bool:
+        try:
+            # Validate limit range
+            allowed = set(self.get_allowed_ports())
+            if port not in allowed:
+                LOGGER.warning(f"Out-of-limit port {port} for '{profile.get('name')}'")
+                return False
+            # Do not override other app profile; skip if in use
+            for p in self.state["profiles"]:
+                if p is profile:
+                    continue
+                try:
+                    if int(p.get("proxy_port") or 0) == int(port) and self.is_process_running(p.get("pid")):
+                        LOGGER.info(f"Port {port} already used by '{p.get('name')}', skip '{profile.get('name')}'")
+                        return False
+                except Exception:
+                    pass
+            # OS busy?
+            if not self.is_port_free_os(port):
+                LOGGER.info(f"Port {port} busy by external process, skip '{profile.get('name')}'")
+                return False
+            if port in self.get_ports_in_use():
+                LOGGER.info(f"Port {port} appears in in-use set, skip '{profile.get('name')}'")
+                return False
+            # Get wireproxy path without dialogs
+            wireproxy_path = self.get_wireproxy_path_noninteractive()
+            if not wireproxy_path:
+                LOGGER.error("WireProxy path not configured. Configure it from the menu before auto connect.")
+                return False
+            # Generate temp conf and start
+            temp_conf = os.path.join(PROFILE_DIR, f"{profile['name']}{TEMP_WIREPROXY_SUFFIX}")
+            proxy_type = (self.state.get("proxy_type") or "socks").lower()
+            self.generate_wireproxy_conf(profile["conf_path"], port, temp_conf, proxy_type)
+            log_path = self.get_wireproxy_log_path(profile['name'])
+            try:
+                if bool(self.state.get("logging_enabled", True)):
+                    self.rotate_profile_log(log_path)
+                    with open(log_path, "a", encoding="utf-8") as log_f:
+                        log_f.write("\n=== Launch wireproxy (auto) ===\n")
+                        log_f.write(f"cmd: {wireproxy_path} -c {temp_conf}\n")
+                        log_f.write(f"proxy_type: {proxy_type}\n")
+                LOGGER.info(f"Auto starting wireproxy for '{profile['name']}' on 127.0.0.1:{port} ({proxy_type})")
+                if bool(self.state.get("logging_enabled", True)):
+                    log_f = open(log_path, "a", encoding="utf-8")
+                    try:
+                        proc = subprocess.Popen([wireproxy_path, "-c", temp_conf], stdout=log_f, stderr=subprocess.STDOUT)
+                    finally:
+                        try:
+                            log_f.close()
+                        except Exception:
+                            pass
+                else:
+                    proc = subprocess.Popen([wireproxy_path, "-c", temp_conf], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+                time.sleep(0.25)
+                if proc.poll() is not None:
+                    LOGGER.error(f"wireproxy exited immediately for '{profile['name']}' (auto), code={proc.returncode}")
+                    return False
+            except Exception:
+                LOGGER.exception(f"Failed to auto start WireProxy for '{profile['name']}'")
+                return False
+            # Update state
+            profile["proxy_port"] = int(port)
+            profile["last_port"] = int(port)
+            profile["pid"] = proc.pid
+            profile["running"] = True
+            LOGGER.info(f"wireproxy started (auto): pid={proc.pid}, profile='{profile['name']}', port={port}")
+            return True
+        except Exception:
+            LOGGER.exception("_connect_profile_with_port_silent failed")
+            return False
+
+    def get_wireproxy_path_noninteractive(self) -> str | None:
+        try:
+            # 1) saved path
+            path = self.state.get("wireproxy_path")
+            if path and os.path.exists(path):
+                return path
+            # 2) PATH lookup
+            guessed = shutil.which("wireproxy") or shutil.which("wireproxy.exe")
+            if guessed and os.path.exists(guessed):
+                self.state["wireproxy_path"] = guessed
+                self.save_state()
+                LOGGER.info(f"Found wireproxy in PATH: {guessed}")
+                return guessed
+        except Exception:
+            pass
+        return None
 
     def pick_port_for_profile(self, profile):
         """Prefer using last_port if valid; otherwise find a new free port."""
