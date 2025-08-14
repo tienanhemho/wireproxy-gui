@@ -160,7 +160,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
             menu.addSeparator()
             menu.addAction("Edit").triggered.connect(lambda: self.edit_profile(row))
-            menu.addAction("Delete").triggered.connect(lambda: self.delete_profile(row))
+            menu.addAction("Delete").triggered.connect(lambda: self.delete_selected_profiles())
             
             menu.addSeparator()
             act_from_here = menu.addAction("Auto-connect from here")
@@ -360,6 +360,47 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.wireproxy_service.stop_process(profile)
             self.profile_service.delete_profile(profile["name"])
             self.refresh_table()
+
+    def delete_selected_profiles(self):
+        selected_items = self.table.selectedItems()
+        if not selected_items:
+            return
+
+        rows = sorted(list(set(item.row() for item in selected_items)))
+        profiles = [self.state_service.get_state()["profiles"][row] for row in rows]
+        
+        if not profiles:
+            return
+
+        if len(profiles) == 1:
+            message = f"Delete '{profiles[0]['name']}'?"
+        else:
+            message = f"Delete {len(profiles)} selected profiles?"
+
+        msg_box = QtWidgets.QMessageBox(self)
+        msg_box.setIcon(QtWidgets.QMessageBox.Icon.Question)
+        msg_box.setText(message)
+        msg_box.setWindowTitle("Delete Profile(s)")
+        yes_button = msg_box.addButton("OK", QtWidgets.QMessageBox.ButtonRole.YesRole)
+        msg_box.addButton("Cancel", QtWidgets.QMessageBox.ButtonRole.NoRole)
+        msg_box.setDefaultButton(yes_button)
+        
+        msg_box.exec()
+
+        if msg_box.clickedButton() == yes_button:
+            # Iterate backwards to avoid index issues when removing items
+            for row in reversed(rows):
+                profile = self.state_service.get_state()["profiles"][row]
+                if profile.get("running"):
+                    self.wireproxy_service.stop_process(profile)
+                self.profile_service.delete_profile(profile["name"])
+            self.refresh_table()
+
+    def keyPressEvent(self, event):
+        if event.key() == QtCore.Qt.Key.Key_Delete:
+            self.delete_selected_profiles()
+        else:
+            super().keyPressEvent(event)
 
     def on_import_button_clicked(self):
         file_path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Choose WireGuard .conf", "", "WireGuard Config (*.conf)")

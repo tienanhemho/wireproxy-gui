@@ -260,19 +260,39 @@ class ProfileService:
     def import_from_wireguard_url(self, url: str) -> tuple[bool, str]:
         """Parses a wireguard:// URL and imports it as a profile."""
         try:
-            # The regex can sometimes pick up trailing punctuation
             url = url.rstrip('.,;')
-            parsed = urlparse(url)
-            if parsed.scheme != "wireguard":
+            if not url.startswith("wireguard://"):
                 return False, "Not a wireguard:// URL"
 
-            private_key = parsed.username
+            # Manual parsing to handle special characters like '%' in the private key.
+            # Format: wireguard://<private_key>@<endpoint>?<query>#<fragment>
+            main_part = url[len("wireguard://"):]
+            
+            at_pos = -1
+            query_pos = main_part.find('?')
+            # Find the last '@' before the query string begins
+            if query_pos != -1:
+                at_pos = main_part.rfind('@', 0, query_pos)
+            else:
+                at_pos = main_part.rfind('@')
+
+            if at_pos == -1:
+                return False, "URL format error: missing '@' separator before endpoint."
+
+            private_key_encoded = main_part[:at_pos]
+            private_key = urllib.parse.unquote(private_key_encoded)
+
+            endpoint_and_the_rest = main_part[at_pos+1:]
+            
+            # Use urlparse on the remainder, which is safer. Add a dummy scheme.
+            temp_url_for_parsing = f"dummy://{endpoint_and_the_rest}"
+            parsed = urlparse(temp_url_for_parsing)
+
             endpoint = parsed.hostname
             if parsed.port:
                 endpoint += f":{parsed.port}"
-            
+
             params = parse_qs(parsed.query)
-            
             public_key = params.get("publickey", [""])[0]
             address = params.get("address", [""])[0]
             name_hint = urllib.parse.unquote(parsed.fragment or "wg_import")
