@@ -5,6 +5,8 @@ import urllib.request
 import urllib.parse
 import base64
 import io
+import re
+from urllib.parse import urlparse, parse_qs
 
 # Optional QR decoders
 try:
@@ -254,3 +256,84 @@ class ProfileService:
         except Exception:
             LOGGER.exception(f"Failed to download text from URL: {url}")
             return None
+
+    def import_from_wireguard_url(self, url: str) -> tuple[bool, str]:
+        """Parses a wireguard:// URL and imports it as a profile."""
+        try:
+            # The regex can sometimes pick up trailing punctuation
+            url = url.rstrip('.,;')
+            parsed = urlparse(url)
+            if parsed.scheme != "wireguard":
+                return False, "Not a wireguard:// URL"
+
+            private_key = parsed.username
+            endpoint = parsed.hostname
+            if parsed.port:
+                endpoint += f":{parsed.port}"
+            
+            params = parse_qs(parsed.query)
+            
+            public_key = params.get("publickey", [""])[0]
+            address = params.get("address", [""])[0]
+            name_hint = urllib.parse.unquote(parsed.fragment or "wg_import")
+
+            if not all([private_key, endpoint, public_key, address]):
+                missing = []
+                if not private_key: missing.append("privatekey (before @)")
+                if not endpoint: missing.append("endpoint (after @)")
+                if not public_key: missing.append("publickey parameter")
+                if not address: missing.append("address parameter")
+                return False, f"URL is missing required fields: {', '.join(missing)}"
+
+            # Build the .conf content
+            lines = [
+                "[Interface]",
+                f"PrivateKey = {private_key}",
+                f"Address = {address}",
+            ]
+            if params.get("mtu"):
+                lines.append(f"MTU = {params['mtu'][0]}")
+
+            lines.append("\n[Peer]")
+            lines.append(f"PublicKey = {public_key}")
+            lines.append(f"Endpoint = {endpoint}")
+            
+            # Add allowed IPs, default to 0.0.0.0/0 if not present
+            allowed_ips = params.get("allowedips", ["0.0.0.0/0"])[0]
+            lines.append(f"AllowedIPs = {allowed_ips}")
+
+            if params.get("keepalive"):
+                lines.append(f"PersistentKeepalive = {params['keepalive'][0]}")
+
+            # Add custom WireProxy params as comments
+            custom_params = {
+                "wnoise": "WNoise", "wpayloadsize": "WPayloadSize",
+                "wquic": "WQUIC", "wnoisecount": "WNoiseCount",
+                "wnoisedelay": "WNoiseDelay"
+            }
+            for key, conf_key in custom_params.items():
+                if key in params:
+                    lines.append(f"# {conf_key} = {params[key][0]}")
+
+            conf_text = "\n".join(lines)
+            return self.import_from_text(name_hint, conf_text)
+
+        except Exception as e:
+            LOGGER.exception(f"Failed to parse wireguard:// URL: {url}")
+            return False, f"Error parsing URL: {e}"
+
+    def import_from_clipboard_text(self, text: str) -> int:
+        """Finds all wireguard:// URLs in a block of text and imports them."""
+        urls = re.findall(r"wireguard://[^\s\'\"<]+", text)
+        if not urls:
+            return 0
+        
+        imported_count = 0
+        for url in urls:
+            success, msg = self.import_from_wireguard_url(url)
+            if success:
+                imported_count += 1
+            else:
+                LOGGER.warning(f"Failed to import from URL '{url}': {msg}")
+        
+        return imported_count

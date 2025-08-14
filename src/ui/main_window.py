@@ -53,8 +53,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.table.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.on_table_context_menu)
 
-        import_btn = QtWidgets.QPushButton("Drag and drop a .conf here or click to choose")
+        # Bottom buttons
+        import_btn = QtWidgets.QPushButton()
+        import_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogOpenButton))
+        import_btn.setToolTip("Import from File...")
         import_btn.clicked.connect(self.on_import_button_clicked)
+
+        clipboard_btn = QtWidgets.QPushButton()
+        # Use a theme icon for 'paste' with a fallback for systems without it
+        paste_icon = QtGui.QIcon.fromTheme("edit-paste", self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileIcon))
+        clipboard_btn.setIcon(paste_icon)
+        clipboard_btn.setToolTip("Import from Clipboard")
+        clipboard_btn.clicked.connect(self.on_import_from_clipboard)
+        
+        bottom_buttons_layout = QtWidgets.QHBoxLayout()
+        bottom_buttons_layout.addStretch(1)
+        bottom_buttons_layout.addWidget(import_btn)
+        bottom_buttons_layout.addWidget(clipboard_btn)
 
         # Controls layout
         controls_layout = QtWidgets.QHBoxLayout()
@@ -85,7 +100,7 @@ class MainWindow(QtWidgets.QMainWindow):
         main_layout = QtWidgets.QVBoxLayout()
         main_layout.addLayout(controls_layout)
         main_layout.addWidget(self.table)
-        main_layout.addWidget(import_btn)
+        main_layout.addLayout(bottom_buttons_layout)
 
         container = QtWidgets.QWidget()
         container.setLayout(main_layout)
@@ -162,6 +177,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
             menu.addSeparator()
             menu.addAction("Import Profile...").triggered.connect(self.on_import_button_clicked)
+            menu.addAction("Import from Clipboard").triggered.connect(self.on_import_from_clipboard)
+            menu.addSeparator()
             menu.addAction("Configure WireProxy Path...").triggered.connect(self.choose_wireproxy_path)
             menu.addAction("Open Logs Folder...").triggered.connect(self.open_logs_folder)
 
@@ -349,10 +366,24 @@ class MainWindow(QtWidgets.QMainWindow):
         if file_path:
             success, msg = self.profile_service.import_from_file(file_path)
             if success:
-                QtWidgets.QMessageBox.information(self, "Success", msg)
                 self.refresh_table()
             else:
                 QtWidgets.QMessageBox.warning(self, "Failed", msg)
+
+    def on_import_from_clipboard(self):
+        clipboard = QtWidgets.QApplication.clipboard()
+        text = clipboard.text()
+
+        if not text:
+            QtWidgets.QMessageBox.information(self, "Clipboard Empty", "Your clipboard is empty.")
+            return
+
+        imported_count = self.profile_service.import_from_clipboard_text(text)
+
+        if imported_count > 0:
+            self.refresh_table()
+        else:
+            QtWidgets.QMessageBox.warning(self, "Not Found", "No valid wireguard:// URLs found in your clipboard.")
 
     def choose_wireproxy_path(self):
         path = self.wireproxy_service.ensure_wireproxy_path(parent_widget=self)
@@ -446,7 +477,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 imported_count += self._handle_url_import(raw_url)
 
         if imported_count > 0:
-            QtWidgets.QMessageBox.information(self, "Success", f"Successfully imported {imported_count} profile(s).")
             self.refresh_table()
 
     def _handle_qr_import(self, file_path: str) -> int:
