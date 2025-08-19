@@ -1,8 +1,26 @@
 # WireProxy GUI Manager
 
-PyQt6 desktop app to manage WireGuard profiles and spawn local proxies via WireProxy.
+## Tại sao tôi tạo ra dự án này?
+
+Dự án này được tạo ra nhằm giải quyết nhu cầu sử dụng **WireGuard như một proxy** trong trình duyệt và các ứng dụng khác một cách đơn giản và thuận tiện.
+
+### Những lý do chính:
+
+1. **Sử dụng WireGuard làm proxy cho trình duyệt**: Thay vì phải kết nối toàn bộ hệ thống qua VPN, tôi muốn có thể sử dụng WireGuard chỉ cho một số ứng dụng cụ thể thông qua proxy HTTP/SOCKS5.
+
+2. **Quản lý profile dễ dàng**: Cần một giao diện đồ họa để import, quản lý và chuyển đổi giữa các profile WireGuard khác nhau mà không cần dùng command line.
+
+3. **Tích hợp WireProxy**: WireProxy là một công cụ tuyệt vời để expose WireGuard connection dưới dạng HTTP/SOCKS5 proxy, nhưng thiếu giao diện người dùng thân thiện.
+
+4. **Flexibility và Control**: Có thể bật/tắt proxy một cách nhanh chóng, kiểm tra trạng thái kết nối, và sử dụng địa chỉ IP từ home network thông qua WireGuard tunnel.
+
+5. **Giải pháp cho multi-account**: Hỗ trợ việc sử dụng nhiều tài khoản hoặc containers khác nhau thông qua các proxy riêng biệt.
+
+---
 
 ## Description
+
+PyQt6 desktop app to manage WireGuard profiles and spawn local proxies via WireProxy.
 
 WireProxy GUI Manager lets you import, manage, connect, and disconnect WireGuard profiles easily, and start a local HTTP or SOCKS5 proxy via WireProxy.
 
