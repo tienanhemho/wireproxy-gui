@@ -4,6 +4,7 @@ import logging
 import socket
 from functools import partial
 from PyQt6 import QtWidgets, QtCore, QtGui
+from PyQt6.QtCore import QRunnable, QThreadPool, pyqtSignal, QObject
 
 from src.ui.edit_dialog import EditProfileDialog
 from src.services.profile_service import IMAGE_EXTENSIONS, is_http_url
@@ -13,6 +14,65 @@ LOGGER = logging.getLogger("wireproxy_gui")
 PROFILE_DIR = "profiles"
 LOG_DIR = "logs"
 PORT_RANGE = (60000, 65535)
+
+
+class WorkerSignals(QObject):
+    """Defines signals available from a running worker thread."""
+    finished = pyqtSignal(int, int)  # pid, port
+    error = pyqtSignal(str)
+
+class FindPortWorkerSignals(QObject):
+    """Defines signals for the port finding worker."""
+    finished = pyqtSignal(int)  # port
+    error = pyqtSignal(str)
+
+class FindPortWorker(QRunnable):
+    """Worker thread for finding a free port."""
+    def __init__(self, find_free_port_func, profile):
+        super().__init__()
+        self.find_free_port = find_free_port_func
+        self.profile = profile
+        self.signals = FindPortWorkerSignals()
+
+    @QtCore.pyqtSlot()
+    def run(self):
+        try:
+            port = self.find_free_port(self.profile)
+            if port:
+                self.signals.finished.emit(port)
+            else:
+                self.signals.error.emit("No free port available within the current limit.")
+        except Exception as e:
+            LOGGER.error(f"Find port worker error: {e}", exc_info=True)
+            self.signals.error.emit(f"An error occurred while finding a port: {e}")
+
+class ConnectWorker(QRunnable):
+    """Worker thread for connecting to WireProxy."""
+    def __init__(self, wireproxy_service, profile, port, is_port_free_os_func=None):
+        super().__init__()
+        self.wireproxy_service = wireproxy_service
+        self.profile = profile
+        self.port = port
+        self.is_port_free_os = is_port_free_os_func
+        self.signals = WorkerSignals()
+
+    @QtCore.pyqtSlot()
+    def run(self):
+        try:
+            # If a port check function is provided, use it.
+            if self.is_port_free_os and not self.is_port_free_os(self.port):
+                self.signals.error.emit(f"Port {self.port} is still in use by an external process.")
+                return
+
+            pid = self.wireproxy_service.start_process(self.profile, self.port)
+            if pid:
+                self.signals.finished.emit(pid, self.port)
+            else:
+                self.signals.error.emit("Failed to start WireProxy. Check logs for details.")
+        except Exception as e:
+            LOGGER.error(f"Connection worker error: {e}", exc_info=True)
+            self.signals.error.emit(f"An unexpected error occurred: {e}")
+
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, state_service, profile_service, wireproxy_service, geoip_service, auto_connect_service):
@@ -28,6 +88,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setAcceptDrops(True)
 
         self._setup_ui()
+
+        self.threadpool = QThreadPool()
         
         # Connect signals from services to UI slots
         self.geoip_service.location_fetched.connect(self._on_location_fetched)
@@ -242,20 +304,43 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self._finish_connecting_specific_port(profile_to_connect, port)
 
+    def on_connection_finished(self, row, pid, port):
+        # Ensure row is still valid
+        if row >= self.table.rowCount():
+            self.refresh_table()
+            return
+            
+        profile = self.state_service.get_state()["profiles"][row]
+        profile["pid"] = pid
+        profile["proxy_port"] = port
+        profile["running"] = True
+        self.state_service.save_state()
+        self.refresh_table()
+
+    def on_connection_error(self, error_message):
+        QtWidgets.QMessageBox.critical(self, "Connection Error", error_message)
+        self.refresh_table()
+
     def _finish_connecting_specific_port(self, profile, port):
-        if not self.is_port_free_os(port):
-            QtWidgets.QMessageBox.critical(self, "Error", f"Port {port} is still in use by an external process.")
+        row = -1
+        profiles = self.state_service.get_state()["profiles"]
+        for i, p in enumerate(profiles):
+            if p["name"] == profile["name"]:
+                row = i
+                break
+        
+        if row == -1:
+            LOGGER.error(f"Could not find row for profile '{profile['name']}'")
+            self.refresh_table()
             return
 
-        pid = self.wireproxy_service.start_process(profile, port)
-        if pid:
-            profile["pid"] = pid
-            profile["proxy_port"] = port
-            profile["running"] = True
-            self.state_service.save_state()
-        else:
-            QtWidgets.QMessageBox.critical(self, "Error", "Failed to start WireProxy. Check logs for details.")
-        self.refresh_table()
+        self.table.setItem(row, 5, QtWidgets.QTableWidgetItem("Connecting..."))
+
+        # Pass the port check function to the worker
+        worker = ConnectWorker(self.wireproxy_service, profile, port, is_port_free_os_func=self.is_port_free_os)
+        worker.signals.finished.connect(lambda pid, p, r=row: self.on_connection_finished(r, pid, p))
+        worker.signals.error.connect(self.on_connection_error)
+        self.threadpool.start(worker)
 
     def auto_connect_all(self):
         if self.auto_connect_service.is_running():
@@ -272,26 +357,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.auto_connect_service.start(indices=indices)
         self.refresh_table()
 
+    def on_port_found(self, row, port):
+        profile = self.state_service.get_state()["profiles"][row]
+        self.table.setItem(row, 5, QtWidgets.QTableWidgetItem("Connecting..."))
+        
+        # Do not perform OS port check here, as find_free_port already did it
+        connect_worker = ConnectWorker(self.wireproxy_service, profile, port)
+        connect_worker.signals.finished.connect(lambda pid, p, r=row: self.on_connection_finished(r, pid, p))
+        connect_worker.signals.error.connect(self.on_connection_error)
+        self.threadpool.start(connect_worker)
+
     def toggle_connection(self, row):
         profile = self.state_service.get_state()["profiles"][row]
         if profile.get("running"):
             self.wireproxy_service.stop_process(profile)
+            self.refresh_table()
         else:
-            port = self.find_free_port(profile)
-            if not port:
-                QtWidgets.QMessageBox.critical(self, "Error", "No free port available within the current limit.")
-                return
+            self.table.setItem(row, 5, QtWidgets.QTableWidgetItem("Finding port..."))
             
-            pid = self.wireproxy_service.start_process(profile, port)
-            if pid:
-                profile["pid"] = pid
-                profile["proxy_port"] = port
-                profile["running"] = True
-                self.state_service.save_state()
-            else:
-                QtWidgets.QMessageBox.critical(self, "Error", "Failed to start WireProxy. Check logs for details.")
-
-        self.refresh_table()
+            port_worker = FindPortWorker(self.find_free_port, profile)
+            port_worker.signals.finished.connect(lambda port, r=row: self.on_port_found(r, port))
+            port_worker.signals.error.connect(self.on_connection_error)
+            self.threadpool.start(port_worker)
 
     def find_free_port(self, profile_to_start):
         state = self.state_service.get_state()
