@@ -188,8 +188,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.table.setItem(row, 2, QtWidgets.QTableWidgetItem(loc))
             self.table.setItem(row, 3, QtWidgets.QTableWidgetItem(zip_code))
 
-            port = str(profile["proxy_port"]) if profile.get("proxy_port") and profile["running"] else "—"
-            self.table.setItem(row, 4, QtWidgets.QTableWidgetItem(port))
+            port_text = "—"
+            if profile.get("running") and profile.get("proxy_port"):
+                port_text = str(profile["proxy_port"])
+            elif profile.get("last_port"):
+                port_text = str(profile["last_port"])
+            self.table.setItem(row, 4, QtWidgets.QTableWidgetItem(port_text))
             
             status_text = "Running" if profile["running"] else "Stopped"
             self.table.setItem(row, 5, QtWidgets.QTableWidgetItem(status_text))
@@ -313,6 +317,7 @@ class MainWindow(QtWidgets.QMainWindow):
         profile = self.state_service.get_state()["profiles"][row]
         profile["pid"] = pid
         profile["proxy_port"] = port
+        profile["last_port"] = port
         profile["running"] = True
         self.state_service.save_state()
         self.refresh_table()
