@@ -576,41 +576,77 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def dropEvent(self, event):
         mime = event.mimeData()
-        if not mime.hasUrls():
-            return
-
         imported_count = 0
-        for url in mime.urls():
-            # Case 1: Local file (.conf or image)
-            if url.isLocalFile():
-                path = url.toLocalFile()
-                if path.lower().endswith(".conf"):
-                    success, _ = self.profile_service.import_from_file(path)
-                    if success: imported_count += 1
-                elif os.path.splitext(path)[1].lower() in IMAGE_EXTENSIONS:
-                    imported_count += self._handle_qr_import(path)
-                continue
 
-            # Case 2: Remote URL (http/https or data)
-            raw_url = url.toString()
-            if raw_url.startswith("data:"): # Image dragged from browser
-                try:
-                    header, b64data = raw_url.split(",", 1)
-                    data = base64.b64decode(b64data)
-                    text = self.profile_service.decode_qr_from_bytes(data)
-                    if text:
-                        if is_http_url(text): # QR points to another URL
-                            imported_count += self._handle_url_import(text)
-                        else: # QR contains config
-                            success, _ = self.profile_service.import_from_text("qr_import", text)
-                            if success: imported_count += 1
-                except Exception as e:
-                    LOGGER.error(f"Failed to process data URL: {e}")
-            elif is_http_url(raw_url): # Regular URL
-                imported_count += self._handle_url_import(raw_url)
+        # Priority 1: Check for raw image data (e.g., from screenshot, browser)
+        if mime.hasImage():
+            image = mime.imageData()
+            if not image.isNull():
+                # Convert QImage to bytes to pass to the decoder
+                byte_array = QtCore.QByteArray()
+                buffer = QtCore.QBuffer(byte_array)
+                buffer.open(QtCore.QIODevice.OpenModeFlag.WriteOnly)
+                image.save(buffer, "PNG") # Save in a format the decoder understands
+                buffer.close()
+                
+                text = self.profile_service.decode_qr_from_bytes(byte_array.data())
+                if text:
+                    if is_http_url(text):
+                        imported_count += self._handle_url_import(text)
+                    else:
+                        success, _ = self.profile_service.import_from_text("pasted_image", text)
+                        if success: imported_count += 1
+        
+        # Priority 2: Check for raw SVG data (often from browsers)
+        elif mime.hasFormat("image/svg+xml"):
+            svg_data = mime.data("image/svg+xml").data()
+            text = self.profile_service.decode_qr_from_bytes(svg_data)
+            if text:
+                if is_http_url(text):
+                    imported_count += self._handle_url_import(text)
+                else:
+                    success, _ = self.profile_service.import_from_text("dragged_svg", text)
+                    if success: imported_count += 1
+
+        # Priority 3: Fallback to URLs (local files or remote links)
+        elif mime.hasUrls():
+            for url in mime.urls():
+                # Case 1: Local file (.conf or image)
+                if url.isLocalFile():
+                    path = url.toLocalFile()
+                    if path.lower().endswith(".conf"):
+                        success, _ = self.profile_service.import_from_file(path)
+                        if success: imported_count += 1
+                    elif os.path.splitext(path)[1].lower() in IMAGE_EXTENSIONS:
+                        imported_count += self._handle_qr_import(path)
+                    continue
+
+                # Case 2: Remote URL (http/https or data)
+                raw_url = url.toString()
+                if raw_url.startswith("data:"): # Image dragged from browser
+                    try:
+                        # This handles cases where the data is base64 encoded in the URL
+                        header, b64data = raw_url.split(",", 1)
+                        data = base64.b64decode(b64data)
+                        text = self.profile_service.decode_qr_from_bytes(data)
+                        if text:
+                            if is_http_url(text): # QR points to another URL
+                                imported_count += self._handle_url_import(text)
+                            else: # QR contains config
+                                success, _ = self.profile_service.import_from_text("qr_import", text)
+                                if success: imported_count += 1
+                    except Exception as e:
+                        LOGGER.error(f"Failed to process data URL: {e}")
+                elif is_http_url(raw_url): # Regular URL
+                    imported_count += self._handle_url_import(raw_url)
 
         if imported_count > 0:
             self.refresh_table()
+        
+        if imported_count == 0:
+            event.ignore()
+        else:
+            event.acceptProposedAction()
 
     def _handle_qr_import(self, file_path: str) -> int:
         """Helper to process QR code from a file path. Returns 1 on success, 0 on failure."""
