@@ -224,6 +224,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 pick_port_menu = menu.addMenu("Connect (pick port)")
                 self.populate_pick_port_menu(pick_port_menu, row)
 
+                act_enter_port = menu.addAction("Connect (enter port)")
+                act_enter_port.triggered.connect(lambda: self.prompt_and_connect(row))
+
             menu.addSeparator()
             menu.addAction("Edit").triggered.connect(lambda: self.edit_profile(row))
             menu.addAction("Delete").triggered.connect(lambda: self.delete_selected_profiles())
@@ -260,12 +263,8 @@ class MainWindow(QtWidgets.QMainWindow):
             label = f"Port {port}" + (" (in use)" if is_used else "")
             action = menu.addAction(label)
             action.triggered.connect(partial(self.connect_with_specific_port, row, port))
-        
-        if len(ports_with_status) >= 50: # Add option to enter manually if list is long
-            menu.addSeparator()
-            menu.addAction("Enter port...").triggered.connect(lambda: self.prompt_and_connect(row))
 
-    def get_ports_for_menu(self, max_ports=50):
+    def get_ports_for_menu(self, max_ports=20):
         """Gets a list of (port, is_used) tuples for the context menu."""
         state = self.state_service.get_state()
         used_ports = {
