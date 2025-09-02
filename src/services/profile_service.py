@@ -8,6 +8,10 @@ import io
 import re
 from urllib.parse import urlparse, parse_qs
 
+from PyQt6.QtCore import QByteArray, QBuffer
+from PyQt6.QtGui import QImage, QPainter
+from PyQt6.QtSvg import QSvgRenderer
+
 # Optional QR decoders
 try:
     import cv2
@@ -25,7 +29,7 @@ except ImportError:
 
 LOGGER = logging.getLogger("wireproxy_gui")
 PROFILE_DIR = "profiles"
-IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".webp")
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".svg")
 
 def is_http_url(s: str) -> bool:
     try:
@@ -199,7 +203,52 @@ class ProfileService:
         except Exception as e:
             return False, f"Failed to write to config file: {e}"
 
+    def _decode_svg_bytes_to_png_bytes(self, svg_data: bytes) -> bytes | None:
+        """Renders SVG data to an in-memory PNG image using Qt."""
+        try:
+            renderer = QSvgRenderer()
+            renderer.load(QByteArray(svg_data))
+            if not renderer.isValid():
+                return None
+
+            size = renderer.defaultSize()
+            if size.isEmpty():
+                size.setWidth(300)
+                size.setHeight(300)
+            
+            image = QImage(size, QImage.Format.Format_ARGB32)
+            image.fill(0x00000000) # Transparent background
+
+            painter = QPainter(image)
+            renderer.render(painter)
+            painter.end()
+
+            byte_array = QByteArray()
+            buffer = QBuffer(byte_array)
+            buffer.open(QBuffer.OpenModeFlag.WriteOnly)
+            image.save(buffer, "PNG")
+            buffer.close()
+            
+            return byte_array.data()
+        except Exception:
+            LOGGER.exception("Failed to convert SVG bytes to PNG")
+            return None
+
     def decode_qr_from_path(self, image_path: str) -> str | None:
+        """Decodes a QR code from an image file, with special handling for SVG."""
+        
+        if image_path.lower().endswith(".svg"):
+            try:
+                with open(image_path, "rb") as f:
+                    svg_bytes = f.read()
+                png_bytes = self._decode_svg_bytes_to_png_bytes(svg_bytes)
+                if png_bytes:
+                    return self.decode_qr_from_bytes(png_bytes)
+            except Exception:
+                LOGGER.exception(f"Failed to read or process SVG file: {image_path}")
+            return None
+
+        # Fallback to original methods for raster images
         if _HAVE_CV2:
             try:
                 img = cv2.imread(image_path)
@@ -220,6 +269,16 @@ class ProfileService:
         return None
 
     def decode_qr_from_bytes(self, data: bytes) -> str | None:
+        """Decodes a QR code from bytes, with special handling for SVG."""
+        # Logic to detect SVG content 
+        print("Decoding QR from bytes, data size:", len(data))
+        # Simple check if data is SVG
+        if b"<svg" in data.lower():
+            png_bytes = self._decode_svg_bytes_to_png_bytes(data)
+            if not png_bytes:
+                return None
+            data = png_bytes # Continue with the converted PNG data
+
         if _HAVE_CV2:
             try:
                 arr = np.frombuffer(data, dtype=np.uint8)
